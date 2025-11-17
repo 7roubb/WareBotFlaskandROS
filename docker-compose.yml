@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  api:
+    build: ./backend
+    container_name: warebot-api
+    restart: always
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - mongo
+      - hivemq
+      - minio
+    ports:
+      - "5000:5000"
+    networks:
+      - warebot-net
+
+  mongo:
+    image: mongo:7
+    container_name: warebot-mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - warebot-net
+
+  hivemq:
+    image: hivemq/hivemq4
+    container_name: warebot-hivemq
+    restart: always
+    ports:
+      - "1883:1883"   # MQTT
+      - "8080:8080"   # HiveMQ dashboard
+    networks:
+      - warebot-net
+
+  minio:
+    image: minio/minio
+    container_name: warebot-minio
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - warebot-net
+
+networks:
+  warebot-net:
+
+volumes:
+  mongo_data:
+  minio_data:
