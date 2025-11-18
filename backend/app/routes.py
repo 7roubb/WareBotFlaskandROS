@@ -6,12 +6,9 @@ import json
 
 # Validation Models
 from .models import (
-    ProductCreate,
-    ProductUpdate,
-    ShelfCreate,
-    ShelfUpdate,
-    RobotCreate,
-    RobotUpdate,
+    ProductCreate, ProductUpdate,
+    ShelfCreate, ShelfUpdate,
+    RobotCreate, RobotUpdate,
     TaskCreate
 )
 
@@ -26,7 +23,14 @@ from .services import (
     update_robot, soft_delete_robot,
     serialize_doc,
     create_task_and_assign,
-    list_tasks
+    list_tasks,
+    subtract_from_product_stock,
+    dashboard_daily_movements,
+    dashboard_shelf_summary,
+    dashboard_top_moving_products,
+    return_product_stock,
+    record_product_transaction,
+    adjust_product_stock
 )
 
 # MinIO + Mongo
@@ -111,31 +115,6 @@ def search_products_route():
     return jsonify(search_products_by_name(q))
 
 
-@api_bp.route("/products/<product_id>/shelf", methods=["GET"])
-def get_product_shelf_route(product_id):
-    shelf = get_shelf_for_product(product_id)
-    if not shelf:
-        return jsonify({"error": "not_found"}), 404
-    return jsonify(shelf)
-
-
-# -------------------- MINIO PRESIGNED UPLOAD URL --------------------
-@api_bp.route("/products/upload-url", methods=["GET"])
-@jwt_required()
-def get_presigned_url():
-    filename = request.args.get("filename")
-    if not filename:
-        return {"error": "filename_required"}, 400
-
-    bucket = current_app.config["MINIO_BUCKET"]
-
-    upload_url = minio_client.presigned_put_object(bucket, filename)
-    public_url = f"http://localhost:9000/{bucket}/{filename}"
-
-    return {"upload_url": upload_url, "public_url": public_url}
-
-
-# ---------------------- FILTER PRODUCTS -----------------------------
 @api_bp.route("/products/filter", methods=["GET"])
 def filter_products():
     db = get_db()
@@ -158,6 +137,99 @@ def filter_products():
 
     docs = db.products.find(query)
     return jsonify([serialize_doc(doc) for doc in docs])
+
+
+# ---------------------------------------------------------
+# PRODUCT STOCK + TRANSACTIONS
+# ---------------------------------------------------------
+@api_bp.route("/products/<product_id>/pick", methods=["POST"])
+@admin_required
+def pick_product_route(product_id):
+    body = request.json
+    qty = body.get("quantity")
+    description = body.get("description")
+
+    if qty is None or qty <= 0:
+        return {"error": "invalid_quantity"}, 400
+
+    try:
+        new_qty = subtract_from_product_stock(product_id, qty, description)
+    except ValueError as e:
+        return {"error": str(e)}, 400
+
+    return jsonify({"status": "ok", "new_quantity": new_qty}), 200
+
+
+@api_bp.route("/products/return", methods=["POST"])
+@admin_required
+def return_stock_route():
+    from .models import StockReturn
+    try:
+        data = StockReturn(**request.json).dict()
+    except ValidationError as e:
+        return handle_pydantic_error(e)
+
+    try:
+        updated = return_product_stock(
+            data["product_id"],
+            data["quantity"],
+            data.get("description")
+        )
+    except ValueError as ex:
+        return {"error": str(ex)}, 404
+
+    return jsonify(updated), 200
+
+
+@api_bp.route("/products/adjust", methods=["POST"])
+@admin_required
+def adjust_stock_route():
+    from .models import StockAdjust
+    try:
+        data = StockAdjust(**request.json).dict()
+    except ValidationError as e:
+        return handle_pydantic_error(e)
+
+    try:
+        updated = adjust_product_stock(
+            data["product_id"],
+            data["new_quantity"],
+            data.get("reason")
+        )
+    except ValueError as ex:
+        return {"error": str(ex)}, 404
+
+    return jsonify(updated), 200
+
+
+@api_bp.route("/products/<product_id>/transactions", methods=["GET"])
+def product_transactions_route(product_id):
+    db = get_db()
+    docs = db.product_transactions.find({"product_id": product_id}).sort("timestamp", -1)
+
+    result = []
+    for d in docs:
+        d["id"] = str(d["_id"])
+        d.pop("_id", None)
+        result.append(d)
+
+    return jsonify(result)
+
+
+# ---------------------------------------------------------
+# MAP ROUTES
+# ---------------------------------------------------------
+@api_bp.route("/maps/merged", methods=["GET"])
+def get_merged_map():
+    db = get_db()
+    doc = db.maps.find_one({"name": "merged_map"})
+
+    if not doc:
+        return {"error": "map_not_found"}, 404
+
+    doc["id"] = str(doc["_id"])
+    doc.pop("_id", None)
+    return doc
 
 
 # ---------------------------------------------------------
@@ -184,6 +256,20 @@ def get_shelf_route(shelf_id):
     if not shelf:
         return jsonify({"error": "not_found"}), 404
     return jsonify(shelf)
+
+
+@api_bp.route("/shelves/<shelf_id>/contents", methods=["GET"])
+def get_shelf_contents_route(shelf_id):
+    shelf = get_shelf(shelf_id)
+    if not shelf:
+        return jsonify({"error": "not_found"}), 404
+
+    products = get_products_for_shelf(shelf_id)
+
+    return jsonify({
+        "shelf": shelf,
+        "products": products
+    })
 
 
 @api_bp.route("/shelves/<shelf_id>", methods=["PUT"])
@@ -223,7 +309,6 @@ def create_robot_route():
         data = RobotCreate(**request.json).dict()
     except ValidationError as e:
         return handle_pydantic_error(e)
-
     return jsonify(create_robot(data)), 201
 
 
@@ -264,9 +349,8 @@ def delete_robot_route(robot_id):
 
 
 # ---------------------------------------------------------
-# TASK SYSTEM (Assign Task → Best Robot → Send via MQTT)
+# TASK ROUTES (Assign Task → Best Robot → MQTT)
 # ---------------------------------------------------------
-
 @api_bp.route("/tasks", methods=["GET"])
 def list_tasks_route():
     return jsonify(list_tasks())
@@ -275,9 +359,6 @@ def list_tasks_route():
 @api_bp.route("/tasks/assign", methods=["POST"])
 @admin_required
 def assign_task_route():
-    """
-    Assign task to the best robot (distance + battery + availability)
-    """
     try:
         data = TaskCreate(**request.json).dict()
     except ValidationError as e:
@@ -287,13 +368,11 @@ def assign_task_route():
     priority = data["priority"]
     description = data.get("description")
 
-    # Create & assign task
     try:
         task = create_task_and_assign(shelf_id, priority, description)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    # Send MQTT command to robot
     topic = f"robots/mp400/{task['assigned_robot_name']}/task"
     payload = {
         "task_id": task["id"],
@@ -304,3 +383,21 @@ def assign_task_route():
     current_app.mqtt.publish(topic, json.dumps(payload))
 
     return jsonify(task), 201
+
+
+# ---------------------------------------------------------
+# DASHBOARD ROUTES
+# ---------------------------------------------------------
+@api_bp.route("/dashboard/top-moving", methods=["GET"])
+def dashboard_top_moving_route():
+    return jsonify(dashboard_top_moving_products())
+
+
+@api_bp.route("/dashboard/shelves", methods=["GET"])
+def dashboard_shelves_route():
+    return jsonify(dashboard_shelf_summary())
+
+
+@api_bp.route("/dashboard/daily", methods=["GET"])
+def dashboard_daily_route():
+    return jsonify(dashboard_daily_movements())

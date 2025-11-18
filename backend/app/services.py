@@ -7,6 +7,9 @@ from math import sqrt
 from .extensions import get_db
 
 
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
 def serialize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     if not doc:
         return doc
@@ -15,9 +18,9 @@ def serialize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     return doc
 
 
-# =========================
-# Product Services
-# =========================
+# =========================================================
+# PRODUCT SERVICES
+# =========================================================
 def create_product(data: dict) -> dict:
     db = get_db()
     now = datetime.utcnow()
@@ -82,26 +85,135 @@ def soft_delete_product(product_id: str) -> bool:
 
 def search_products_by_name(query: str) -> List[dict]:
     db = get_db()
-    docs = db.products.find(
-        {"deleted": False, "name": {"$regex": query, "$options": "i"}}
-    )
+    docs = db.products.find({
+        "deleted": False,
+        "name": {"$regex": query, "$options": "i"}
+    })
     return [serialize_doc(d) for d in docs]
 
 
 def get_shelf_for_product(product_id: str) -> Optional[dict]:
-    db = get_db()
     product = get_product(product_id)
     if not product:
         return None
+
     shelf_id = product.get("shelf_id")
     if not shelf_id:
         return None
+
     return get_shelf(shelf_id)
 
 
-# =========================
-# Shelf Services
-# =========================
+# =========================================================
+# STOCK MOVEMENTS (PICK / RETURN / ADJUST)
+# =========================================================
+def record_product_transaction(data: dict):
+    db = get_db()
+    now = datetime.utcnow()
+
+    doc = {
+        "product_id": data["product_id"],
+        "action": data["action"],   # PICK / RETURN / ADJUST
+        "quantity": data["quantity"],
+        "timestamp": now,
+        "description": data.get("description"),
+        "shelf_id": data.get("shelf_id"),
+        "old_quantity": data["old_quantity"],
+        "new_quantity": data["new_quantity"],
+    }
+
+    db.product_transactions.insert_one(doc)
+    return doc
+
+
+def subtract_from_product_stock(product_id: str, qty: int, description=None):
+    db = get_db()
+
+    product = get_product(product_id)
+    if not product:
+        raise ValueError("product_not_found")
+
+    old_qty = product["quantity"]
+    if qty > old_qty:
+        raise ValueError("not_enough_stock")
+
+    new_qty = old_qty - qty
+
+    db.products.update_one(
+        {"_id": ObjectId(product_id)},
+        {"$set": {"quantity": new_qty, "updated_at": datetime.utcnow()}}
+    )
+
+    record_product_transaction({
+        "product_id": product_id,
+        "quantity": qty,
+        "action": "PICK",
+        "old_quantity": old_qty,
+        "new_quantity": new_qty,
+        "shelf_id": product.get("shelf_id"),
+        "description": description
+    })
+
+    return new_qty
+
+
+def return_product_stock(product_id: str, quantity: int, description: str | None):
+    db = get_db()
+
+    product = get_product(product_id)
+    if not product:
+        raise ValueError("product_not_found")
+
+    new_qty = product["quantity"] + quantity
+
+    db.products.update_one(
+        {"_id": ObjectId(product_id)},
+        {"$set": {"quantity": new_qty, "updated_at": datetime.utcnow()}}
+    )
+
+    db.product_transactions.insert_one({
+        "product_id": product_id,
+        "type": "RETURN",
+        "quantity": quantity,
+        "before": product["quantity"],
+        "after": new_qty,
+        "description": description,
+        "created_at": datetime.utcnow()
+    })
+
+    return get_product(product_id)
+
+
+def adjust_product_stock(product_id: str, new_quantity: int, reason: str | None):
+    db = get_db()
+
+    product = get_product(product_id)
+    if not product:
+        raise ValueError("product_not_found")
+
+    before = product["quantity"]
+
+    db.products.update_one(
+        {"_id": ObjectId(product_id)},
+        {"$set": {"quantity": new_quantity, "updated_at": datetime.utcnow()}}
+    )
+
+    db.product_transactions.insert_one({
+        "product_id": product_id,
+        "type": "ADJUST",
+        "quantity": abs(new_quantity - before),
+        "before": before,
+        "after": new_quantity,
+        "reason": reason,
+        "created_at": datetime.utcnow()
+    })
+
+    return get_product(product_id)
+
+
+# =========================================================
+# SHELF SERVICES
+# =========================================================
 def create_shelf(data: dict) -> dict:
     db = get_db()
     now = datetime.utcnow()
@@ -163,9 +275,9 @@ def get_products_for_shelf(shelf_id: str) -> List[dict]:
     return [serialize_doc(d) for d in docs]
 
 
-# =========================
-# Robot Services
-# =========================
+# =========================================================
+# ROBOT SERVICES
+# =========================================================
 def create_robot(data: dict) -> dict:
     db = get_db()
     now = datetime.utcnow()
@@ -226,9 +338,6 @@ def soft_delete_robot(robot_id: str) -> bool:
 
 
 def update_robot_telemetry(robot_name: str, telemetry: dict):
-    """
-    Called from MQTT client: identify robot by 'name'.
-    """
     db = get_db()
     telemetry["updated_at"] = datetime.utcnow()
     db.robots.update_one(
@@ -238,71 +347,12 @@ def update_robot_telemetry(robot_name: str, telemetry: dict):
     )
 
 
-# =========================
-# Admin / Auth Services
-# =========================
-def get_admin_by_username(username: str) -> Optional[dict]:
-    db = get_db()
-    doc = db.admins.find_one({"username": username})
-    if not doc:
-        return None
-    return serialize_doc(doc)
-
-
-def create_admin(username: str, password: str) -> dict:
-    db = get_db()
-    now = datetime.utcnow()
-    password_hash = generate_password_hash(password)
-    doc = {
-        "username": username,
-        "password_hash": password_hash,
-        "role": "ADMIN",
-        "created_at": now,
-    }
-    res = db.admins.insert_one(doc)
-    return serialize_doc(db.admins.find_one({"_id": res.inserted_id}))
-
-
-def verify_admin_password(username: str, password: str) -> bool:
-    db = get_db()
-    doc = db.admins.find_one({"username": username})
-    if not doc:
-        return False
-    return check_password_hash(doc["password_hash"], password)
-
-
-def assign_task_to_best_robot(shelf_id):
-    db = get_db()
-    shelf = db.shelves.find_one({"_id": ObjectId(shelf_id)})
-
-    if not shelf:
-        raise ValueError("shelf_not_found")
-
-    sx, sy = shelf["xCoord"], shelf["yCoord"]
-
-    robots = list(db.robots.find({"available": True}))
-
-    if not robots:
-        raise ValueError("no_available_robots")
-
-    best = None
-    best_cost = float("inf")
-
-    for r in robots:
-        rx, ry = r.get("x", 0), r.get("y", 0)
-        battery = r.get("battery", 100)
-
-        dist = sqrt((rx - sx) ** 2 + (ry - sy) ** 2)
-
-        cost = dist * 0.7 + (100 - battery) * 0.3
-
-        if cost < best_cost:
-            best = r
-            best_cost = cost
-
-    return best
+# =========================================================
+# TASK SYSTEM (Find Best Robot)
+# =========================================================
 def euclidean(x1, y1, x2, y2):
-    return sqrt((x1 - x2)**2 + (y1 - y2)**2)
+    return sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+
 
 def create_task_and_assign(shelf_id: str, priority: int, description: str | None):
     db = get_db()
@@ -349,7 +399,7 @@ def create_task_and_assign(shelf_id: str, priority: int, description: str | None
         "description": description,
         "assigned_robot_name": best_robot["name"],
         "assigned_robot_id": best_robot["_id"],
-        "status": "PENDING",  # PENDING → RUNNING → DONE
+        "status": "PENDING",
         "created_at": now,
         "updated_at": now,
     }
@@ -370,7 +420,86 @@ def update_task_status(task_id: str, status: str):
     )
     return res.modified_count > 0
 
+
 def list_tasks() -> List[dict]:
     db = get_db()
     docs = db.tasks.find({})
     return [serialize_doc(d) for d in docs]
+
+
+# =========================================================
+# DASHBOARD SERVICES
+# =========================================================
+def dashboard_top_moving_products(limit=10):
+    db = get_db()
+    pipeline = [
+        {"$match": {"type": "TAKE"}},
+        {"$group": {"_id": "$product_id", "total_taken": {"$sum": "$quantity"}}},
+        {"$sort": {"total_taken": -1}},
+        {"$limit": limit}
+    ]
+    return list(pipeline)
+
+
+def dashboard_shelf_summary():
+    db = get_db()
+    shelves = list(db.shelves.find({"deleted": False}))
+    result = []
+
+    for s in shelves:
+        products = list(db.products.find({"shelf_id": s["id"], "deleted": False}))
+        total_items = sum(p["quantity"] for p in products)
+        result.append({
+            "shelf_id": s["id"],
+            "coords": (s["x_coord"], s["y_coord"]),
+            "level": s["level"],
+            "products": len(products),
+            "total_items": total_items
+        })
+
+    return result
+
+
+def dashboard_daily_movements():
+    db = get_db()
+    today = datetime.utcnow().date().isoformat()
+
+    pipeline = [
+        {"$match": {"created_at": {"$gte": datetime.fromisoformat(today)}}},
+        {"$group": {"_id": "$type", "qty": {"$sum": "$quantity"}}}
+    ]
+
+    return list(pipeline)
+
+
+# =========================================================
+# AUTH SERVICES (Admins)
+# =========================================================
+def get_admin_by_username(username: str) -> Optional[dict]:
+    db = get_db()
+    doc = db.admins.find_one({"username": username})
+    if not doc:
+        return None
+    return serialize_doc(doc)
+
+
+def create_admin(username: str, password: str) -> dict:
+    db = get_db()
+    now = datetime.utcnow()
+    password_hash = generate_password_hash(password)
+    doc = {
+        "username": username,
+        "password_hash": password_hash,
+        "role": "ADMIN",
+        "created_at": now,
+    }
+    res = db.admins.insert_one(doc)
+    return serialize_doc(db.admins.find_one({"_id": res.inserted_id}))
+
+
+def verify_admin_password(username: str, password: str) -> bool:
+    db = get_db()
+    doc = db.admins.find_one({"username": username})
+    if not doc:
+        return False
+    return check_password_hash(doc["password_hash"], password)

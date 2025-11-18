@@ -158,3 +158,20 @@ class TaskCreate(BaseModel):
     shelf_id: str = Field(..., description="Target shelf to pick/place")
     priority: int = Field(default=1, ge=1, le=10)
     description: Optional[str] = None
+
+class ProductTransactionCreate(BaseModel):
+    product_id: str
+    quantity: int = Field(..., gt=0)
+    action: str = Field(..., pattern="^(PICK|RETURN|ADJUST)$")
+    description: Optional[str] = None
+
+class StockReturn(BaseModel):
+    product_id: str
+    quantity: int = Field(..., gt=0)
+    description: Optional[str] = None
+
+
+class StockAdjust(BaseModel):
+    product_id: str
+    new_quantity: int = Field(..., ge=0)
+    reason: Optional[str] = None
