@@ -101,20 +101,23 @@ def on_message(client, userdata, msg):
             app.logger.error(f"[MQTT] Map merge error: {e}")
 
 
-# ---------------------------------------------------
-# START MQTT CLIENT
-# ---------------------------------------------------
-def start_mqtt_client(app):
-    global mqtt_client, client_started
-
-    if client_started:
-        return
-
-    mqtt_client = mqtt.Client(
-        client_id="warebot-backend",
-        userdata={"app": app},
-        protocol=mqtt.MQTTv5
-    )
+    # -----------------------------------------------
+    # CUSTOM ROBOT TOPIC (for monitoring)
+    # robots/mp400/<robot_name>/<custom_topic>
+    # -----------------------------------------------
+    elif topic:
+        # Check if topic matches any robot's topic in DB
+        robot = db.robots.find_one({"topic": topic, "deleted": False})
+        if robot:
+            try:
+                data = json.loads(payload_str)
+                # Example: update robot telemetry or map, or log data
+                app.logger.info(f"[MQTT] Data from robot topic {topic}: {data}")
+                # Optionally update telemetry or map here
+                # update_robot_telemetry(robot["name"], data)
+            except Exception as e:
+                app.logger.error(f"[MQTT] Robot topic error: {e}")
+    
 
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message

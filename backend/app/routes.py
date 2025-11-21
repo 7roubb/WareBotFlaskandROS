@@ -309,7 +309,42 @@ def create_robot_route():
         data = RobotCreate(**request.json).dict()
     except ValidationError as e:
         return handle_pydantic_error(e)
-    return jsonify(create_robot(data)), 201
+
+    # Store robot with topic
+    robot = create_robot(data)
+
+    # Subscribe to robot topic via MQTT
+    topic = data.get("topic")
+    mqtt_client = current_app.mqtt
+    if mqtt_client and topic:
+        mqtt_client.subscribe(topic)
+        current_app.logger.info(f"[MQTT] Subscribed to robot topic: {topic}")
+
+    return jsonify(robot), 201
+
+
+# ---------------------------------------------------------
+# MONITOR ROBOT BY TOPIC
+# ---------------------------------------------------------
+@api_bp.route("/robots/monitor", methods=["POST"])
+@admin_required
+def monitor_robot_topic_route():
+    """
+    Register a robot topic to monitor and subscribe to it via MQTT.
+    Body: { "topic": "robots/mp400/robot1/custom_topic" }
+    """
+    topic = request.json.get("topic")
+    if not topic or not isinstance(topic, str):
+        return jsonify({"error": "invalid_topic"}), 400
+
+    # Subscribe to the topic using the MQTT client
+    mqtt_client = current_app.mqtt
+    if mqtt_client:
+        mqtt_client.subscribe(topic)
+        current_app.logger.info(f"[MQTT] Subscribed to new robot topic: {topic}")
+        return jsonify({"status": "subscribed", "topic": topic}), 200
+    else:
+        return jsonify({"error": "mqtt_not_initialized"}), 500
 
 
 @api_bp.route("/robots", methods=["GET"])

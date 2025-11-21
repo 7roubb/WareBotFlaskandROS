@@ -84,6 +84,7 @@ class ShelfUpdate(BaseModel):
 # ---------- Robot ----------
 class RobotCreate(BaseModel):
     name: str
+    topic: str
     available: bool = True
     status: str = "IDLE"
     current_shelf_id: Optional[str] = None
@@ -102,6 +103,7 @@ class RobotCreate(BaseModel):
 
 class RobotUpdate(BaseModel):
     name: Optional[str] = None
+    topic: Optional[str] = None
     available: Optional[bool] = None
     status: Optional[str] = None
     current_shelf_id: Optional[str] = None
