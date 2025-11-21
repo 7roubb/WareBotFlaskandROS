@@ -1,0 +1,36 @@
+running egg_info
+creating build/warebot_robot_bridge/warebot_robot_bridge.egg-info
+writing build/warebot_robot_bridge/warebot_robot_bridge.egg-info/PKG-INFO
+writing dependency_links to build/warebot_robot_bridge/warebot_robot_bridge.egg-info/dependency_links.txt
+writing entry points to build/warebot_robot_bridge/warebot_robot_bridge.egg-info/entry_points.txt
+writing requirements to build/warebot_robot_bridge/warebot_robot_bridge.egg-info/requires.txt
+writing top-level names to build/warebot_robot_bridge/warebot_robot_bridge.egg-info/top_level.txt
+writing manifest file 'build/warebot_robot_bridge/warebot_robot_bridge.egg-info/SOURCES.txt'
+reading manifest file 'build/warebot_robot_bridge/warebot_robot_bridge.egg-info/SOURCES.txt'
+writing manifest file 'build/warebot_robot_bridge/warebot_robot_bridge.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build
+creating /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib
+creating /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge
+copying warebot_robot_bridge/__init__.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge
+copying warebot_robot_bridge/robot_monitor.launch.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge
+running install
+running install_lib
+creating /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge
+copying /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge/__init__.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge
+copying /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge/robot_monitor.launch.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge
+byte-compiling /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge/__init__.py to __init__.cpython-312.pyc
+byte-compiling /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge/robot_monitor.launch.py to robot_monitor.launch.cpython-312.pyc
+running install_data
+creating /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/ament_index
+creating /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/ament_index/resource_index
+creating /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/ament_index/resource_index/packages
+copying resource/warebot_robot_bridge -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/ament_index/resource_index/packages
+copying package.xml -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/warebot_robot_bridge
+copying warebot_robot_bridge/robot_monitor.launch.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/warebot_robot_bridge
+running install_egg_info
+Copying build/warebot_robot_bridge/warebot_robot_bridge.egg-info to /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge-0.0.0-py3.12.egg-info
+running install_scripts
+Installing robot_monitor_mqtt script to /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/warebot_robot_bridge
+writing list of installed files to '/home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/install.log'

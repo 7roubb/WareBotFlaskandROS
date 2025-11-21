@@ -1,0 +1,2 @@
+[console_scripts]
+robot_monitor_mqtt = warebot_robot_bridge.robot_monitor_mqtt:main

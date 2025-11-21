@@ -1,0 +1,38 @@
+[1.288s] Invoking command in '/home/super/jazzy_ws/src/warebot_robot_bridge': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base build/warebot_robot_bridge build --build-base /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build install --record /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/install.log --single-version-externally-managed install_data
+[1.701s] running egg_info
+[1.701s] creating build/warebot_robot_bridge/warebot_robot_bridge.egg-info
+[1.737s] writing build/warebot_robot_bridge/warebot_robot_bridge.egg-info/PKG-INFO
+[1.737s] writing dependency_links to build/warebot_robot_bridge/warebot_robot_bridge.egg-info/dependency_links.txt
+[1.737s] writing entry points to build/warebot_robot_bridge/warebot_robot_bridge.egg-info/entry_points.txt
+[1.738s] writing requirements to build/warebot_robot_bridge/warebot_robot_bridge.egg-info/requires.txt
+[1.738s] writing top-level names to build/warebot_robot_bridge/warebot_robot_bridge.egg-info/top_level.txt
+[1.738s] writing manifest file 'build/warebot_robot_bridge/warebot_robot_bridge.egg-info/SOURCES.txt'
+[1.815s] reading manifest file 'build/warebot_robot_bridge/warebot_robot_bridge.egg-info/SOURCES.txt'
+[1.817s] writing manifest file 'build/warebot_robot_bridge/warebot_robot_bridge.egg-info/SOURCES.txt'
+[1.817s] running build
+[1.817s] running build_py
+[1.817s] creating /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build
+[1.817s] creating /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib
+[1.817s] creating /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge
+[1.818s] copying warebot_robot_bridge/__init__.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge
+[1.818s] copying warebot_robot_bridge/robot_monitor.launch.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge
+[1.818s] running install
+[1.826s] running install_lib
+[1.865s] creating /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge
+[1.865s] copying /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge/__init__.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge
+[1.865s] copying /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build/lib/warebot_robot_bridge/robot_monitor.launch.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge
+[1.866s] byte-compiling /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge/__init__.py to __init__.cpython-312.pyc
+[1.866s] byte-compiling /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge/robot_monitor.launch.py to robot_monitor.launch.cpython-312.pyc
+[1.867s] running install_data
+[1.867s] creating /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/ament_index
+[1.867s] creating /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/ament_index/resource_index
+[1.867s] creating /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/ament_index/resource_index/packages
+[1.867s] copying resource/warebot_robot_bridge -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/ament_index/resource_index/packages
+[1.868s] copying package.xml -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/warebot_robot_bridge
+[1.868s] copying warebot_robot_bridge/robot_monitor.launch.py -> /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/share/warebot_robot_bridge
+[1.868s] running install_egg_info
+[1.911s] Copying build/warebot_robot_bridge/warebot_robot_bridge.egg-info to /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages/warebot_robot_bridge-0.0.0-py3.12.egg-info
+[1.912s] running install_scripts
+[2.125s] Installing robot_monitor_mqtt script to /home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/warebot_robot_bridge
+[2.125s] writing list of installed files to '/home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/install.log'
+[2.161s] Invoked command in '/home/super/jazzy_ws/src/warebot_robot_bridge' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/super/jazzy_ws/src/warebot_robot_bridge/install/warebot_robot_bridge/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base build/warebot_robot_bridge build --build-base /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/build install --record /home/super/jazzy_ws/src/warebot_robot_bridge/build/warebot_robot_bridge/install.log --single-version-externally-managed install_data
