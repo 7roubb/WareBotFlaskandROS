@@ -1,54 +1,38 @@
 import json
-import time
 import paho.mqtt.client as mqtt
 from flask import current_app
 from .extensions import get_db
-from .models import RobotTelemetry
-from .services import (
-    update_robot_telemetry,
-    update_task_status
-)
+from .services import update_robot_telemetry, update_task_status
 
-mqtt_client = None   # Global client (يُستخدم في Flask app)
+mqtt_client = None
 client_started = False
 
-
-# ---------------------------------------------------
-# CONNECT CALLBACK
-# ---------------------------------------------------
+# ===========================================
+# MQTT CALLBACKS
+# ===========================================
 def on_connect(client, userdata, flags, reason_code, properties=None):
     app = userdata["app"]
-
     app.logger.info(f"[MQTT] Connected with code: {reason_code}")
 
-    # Subscribe to robot telemetry
+    # Subscriptions
     client.subscribe("robots/mp400/+/status")
-
-    # Subscribe to task status updates
     client.subscribe("robots/mp400/+/task_status")
-
-    # Subscribe to merged map
     client.subscribe("warehouse/map")
 
-    app.logger.info("[MQTT] Subscribed to all robot/map topics")
+    app.logger.info("[MQTT] Subscribed to robot and map topics")
 
 
-# ---------------------------------------------------
-# MESSAGE CALLBACK
-# ---------------------------------------------------
 def on_message(client, userdata, msg):
     app = userdata["app"]
     topic = msg.topic
     payload_str = msg.payload.decode("utf-8")
 
+    db = get_db()
     app.logger.debug(f"[MQTT] Message → {topic}: {payload_str}")
 
-    db = get_db()
-
-    # -----------------------------------------------
+    # ----------------------------
     # ROBOT TELEMETRY
-    # robots/mp400/robot1/status
-    # -----------------------------------------------
+    # ----------------------------
     if topic.startswith("robots/mp400/") and topic.endswith("/status"):
         try:
             robot_name = topic.split("/")[2]
@@ -63,94 +47,95 @@ def on_message(client, userdata, msg):
                 "y": data.get("y"),
                 "status": data.get("status", "IDLE")
             }
-
             update_robot_telemetry(robot_name, telemetry)
 
         except Exception as e:
-            app.logger.error(f"[MQTT] Telemetry parsing error: {e}")
+            app.logger.error(f"[MQTT] Telemetry error: {e}")
 
-    # -----------------------------------------------
+    # ----------------------------
     # TASK STATUS
-    # robots/mp400/robot1/task_status
-    # -----------------------------------------------
+    # ----------------------------
     elif topic.startswith("robots/mp400/") and topic.endswith("/task_status"):
         try:
             data = json.loads(payload_str)
-            task_id = data.get("task_id")
-            status = data.get("status")
-
-            if task_id and status:
-                update_task_status(task_id, status)
-
+            if data.get("task_id") and data.get("status"):
+                update_task_status(data["task_id"], data["status"])
         except Exception as e:
-            app.logger.error(f"[MQTT] Task status error: {e}")
+            app.logger.error(f"[MQTT] Task error: {e}")
 
-    # -----------------------------------------------
-    # MAP MERGE
-    # warehouse/map
-    # -----------------------------------------------
+    # ----------------------------
+    # MERGED MAP
+    # ----------------------------
     elif topic == "warehouse/map":
         try:
             data = json.loads(payload_str)
             db.maps.update_one(
                 {"name": "merged_map"},
                 {"$set": data},
-                upsert=True,
+                upsert=True
             )
         except Exception as e:
-            app.logger.error(f"[MQTT] Map merge error: {e}")
+            app.logger.error(f"[MQTT] Map error: {e}")
 
-
-    # -----------------------------------------------
-    # CUSTOM ROBOT TOPIC (for monitoring)
-    # robots/mp400/<robot_name>/<custom_topic>
-    # -----------------------------------------------
-    elif topic:
-        # Check if topic matches any robot's topic in DB
+    # ----------------------------
+    # CUSTOM ROBOT TOPICS
+    # ----------------------------
+    else:
         robot = db.robots.find_one({"topic": topic, "deleted": False})
         if robot:
             try:
                 data = json.loads(payload_str)
-                # Example: update robot telemetry or map, or log data
-                app.logger.info(f"[MQTT] Data from robot topic {topic}: {data}")
-                # Optionally update telemetry or map here
-                # update_robot_telemetry(robot["name"], data)
+                app.logger.info(f"[MQTT] Custom topic {topic}: {data}")
             except Exception as e:
-                app.logger.error(f"[MQTT] Robot topic error: {e}")
-    
+                app.logger.error(f"[MQTT] Custom topic error: {e}")
 
+
+# ===========================================
+# START MQTT CLIENT (THIS WAS MISSING!)
+# ===========================================
+def start_mqtt_client(app):
+    global mqtt_client, client_started
+
+    if client_started:
+        return mqtt_client
+
+    mqtt_client = mqtt.Client(
+        client_id="warebot_backend",
+        userdata={"app": app},
+        protocol=mqtt.MQTTv5
+    )
+
+    # Set callbacks
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
 
-    # Auth if provided
+    # Auth
     username = app.config.get("MQTT_USERNAME")
     password = app.config.get("MQTT_PASSWORD")
     if username:
         mqtt_client.username_pw_set(username, password)
 
-    # Connect to HiveMQ
+    # Connect
     mqtt_client.connect(
         app.config["MQTT_HOST"],
-        app.config["MQTT_PORT"],
+        int(app.config["MQTT_PORT"]),
         keepalive=60
     )
 
     mqtt_client.loop_start()
     client_started = True
 
-    app.mqtt = mqtt_client
+    app.logger.info("[MQTT] Client started")
+    return mqtt_client
 
-    app.logger.info("[MQTT] Client initialized & loop started")
 
-
-# ---------------------------------------------------
+# ===========================================
 # PUBLISH WRAPPER
-# ---------------------------------------------------
-def publish_message(topic: str, payload: str):
-    if mqtt_client is None:
-        print("[MQTT] ERROR: client not started")
+# ===========================================
+def publish_message(topic, payload):
+    if not mqtt_client:
+        print("[MQTT] ERROR: MQTT client not running")
         return False
 
     mqtt_client.publish(topic, payload)
-    print(f"[MQTT] Published → {topic}: {payload}")
     return True
