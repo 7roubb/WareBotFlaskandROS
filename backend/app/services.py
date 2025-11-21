@@ -4,11 +4,12 @@ from bson import ObjectId
 from werkzeug.security import generate_password_hash, check_password_hash
 import uuid
 import io
-
+import os
 from influxdb_client import Point
 from flask import current_app
 
-from .extensions import get_db, minio_client, get_influx
+from .extensions import get_db, get_influx, get_minio
+
 from .models import ROBOT_STATUSES
 
 
@@ -525,26 +526,51 @@ def verify_admin_password(username: str, password: str) -> bool:
 # MINIO IMAGE SERVICES
 # =========================================================
 def upload_image_to_minio(file_content: bytes, filename: str, product_id: str, content_type: str):
-    if not minio_client:
+    client = get_minio()
+    if not client:
         raise Exception("MinIO not initialized")
 
     bucket = current_app.config["MINIO_BUCKET"]
 
-    object_name = f"products/{product_id}/{filename or uuid.uuid4()}.jpg"
+    # -------------------------------------------
+    # Clean filename (remove spaces, strange chars)
+    # -------------------------------------------
+    filename = filename.strip().replace(" ", "_")
 
-    minio_client.put_object(
-        bucket,
-        object_name,
+    # Extract name + extension safely
+    name, ext = os.path.splitext(filename)
+
+    # If no extension → default to .jpg
+    if not ext:
+        ext = ".jpg"
+
+    # -------------------------------------------
+    # Build correct object path
+    # No double "products/products"
+    # -------------------------------------------
+    object_name = f"{product_id}/{name}{ext}"
+
+    # -------------------------------------------
+    # Upload to MinIO
+    # -------------------------------------------
+    client.put_object(
+        bucket_name=bucket,
+        object_name=object_name,
         data=io.BytesIO(file_content),
         length=len(file_content),
         content_type=content_type
     )
 
-    return f"http://{current_app.config['MINIO_ENDPOINT']}/{bucket}/{object_name}"
+    # -------------------------------------------
+    # Public URL for frontend
+    # Use PUBLIC_MINIO instead of MINIO_ENDPOINT
+    # -------------------------------------------
+    public_domain = current_app.config.get("PUBLIC_MINIO", "localhost:9000")
 
+    return f"http://{public_domain}/{bucket}/{object_name}"
 
 def delete_image_from_minio(url: str) -> bool:
-    if not minio_client:
+    if not get_minio():
         return False
 
     bucket = current_app.config["MINIO_BUCKET"]
@@ -554,7 +580,7 @@ def delete_image_from_minio(url: str) -> bool:
         return False
 
     object_name = url.replace(prefix, "")
-    minio_client.remove_object(bucket, object_name)
+    get_minio().remove_object(bucket, object_name)
     return True
 
 

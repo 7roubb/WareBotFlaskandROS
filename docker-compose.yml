@@ -71,6 +71,29 @@ services:
       - influxdb_data:/var/lib/influxdb2
     networks:
       - warebot-net
+  minio_init:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+        echo '⏳ Waiting for MinIO to be ready...';
+        sleep 5;
+
+        echo '🔗 Setting MinIO alias...';
+        mc alias set local http://minio:9000 admin admin123;
+
+        echo '🪣 Creating bucket if not exists...';
+        mc mb -p local/products || true;
+
+        echo '🌍 Making bucket public (anonymous READ)...';
+        mc anonymous set download local/products;
+
+        echo '✅ MinIO bucket \"products\" is public and ready!';
+      "
+    networks:
+      - warebot-net
+
 
   chronograf:
     image: chronograf:latest

@@ -100,9 +100,17 @@ def search_product_route():
 # =========================================================
 # PRODUCT IMAGES
 # =========================================================
-@api_bp.route("/products/<product_id>/images", methods=["POST"])
+from flask_cors import cross_origin
+
+@api_bp.route("/products/<product_id>/images", methods=["POST", "OPTIONS"])
+@cross_origin()
 @admin_required
 def upload_image_route(product_id):
+
+    # Handle CORS preflight
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
     if "image" not in request.files:
         return {"error": "no_image_uploaded"}, 400
 
@@ -127,7 +135,11 @@ def upload_image_route(product_id):
     images.append(url)
     updated = update_product_images(product_id, image_urls=images)
 
-    return jsonify({"status": "uploaded", "image_url": url, "product": updated})
+    return jsonify({
+        "status": "uploaded",
+        "image_url": url,
+        "product": updated
+    })
 
 
 @api_bp.route("/products/<product_id>/images/<int:index>", methods=["DELETE"])

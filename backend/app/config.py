@@ -1,47 +1,45 @@
 import os
-from dotenv import load_dotenv
-
-load_dotenv()  # Load .env file
-
 
 class Config:
     # -----------------------------
     # MongoDB
     # -----------------------------
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongo:27017/warebot_db")
-    MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "warebot_db")
+    MONGO_URI = os.environ.get("MONGO_URI", "mongodb://mongo:27017/warebot_db")
+    MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "warebot_db")
 
     # -----------------------------
     # JWT
     # -----------------------------
-    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "SUPER_SECRET_KEY")
+    JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "SUPER_SECRET_KEY")
 
     # -----------------------------
     # MinIO
     # -----------------------------
-    MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
-    MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "admin")
-    MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "admin123")
-    MINIO_BUCKET = os.getenv("MINIO_BUCKET", "products")
-    MINIO_SECURE = os.getenv("MINIO_SECURE", "False").lower() == "true"
+    MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "minio:9000")
+    MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "admin")
+    MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "admin123")
+    MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "products")
+
+    # Convert "True"/"False" → Boolean
+    MINIO_SECURE = os.environ.get("MINIO_SECURE", "False").lower() == "true"
 
     # -----------------------------
     # MQTT
     # -----------------------------
-    MQTT_HOST = os.getenv("MQTT_HOST", "hivemq")
-    MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
-    MQTT_USERNAME = os.getenv("MQTT_USERNAME")
-    MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
+    MQTT_HOST = os.environ.get("MQTT_HOST", "hivemq")
+    MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
+    MQTT_USERNAME = os.environ.get("MQTT_USERNAME")
+    MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD")
 
     # -----------------------------
-    # InfluxDB (Time-Series)
+    # InfluxDB
     # -----------------------------
-    INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
-    INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "influx-token")
-    INFLUX_ORG = os.getenv("INFLUX_ORG", "warebot")
-    INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "telemetry")
+    INFLUX_URL = os.environ.get("INFLUX_URL", "http://influxdb:8086")
+    INFLUX_TOKEN = os.environ.get("INFLUX_TOKEN", "influx-token")
+    INFLUX_ORG = os.environ.get("INFLUX_ORG", "warebot")
+    INFLUX_BUCKET = os.environ.get("INFLUX_BUCKET", "telemetry")
 
     # -----------------------------
-    # Flask debug
+    # Debug
     # -----------------------------
-    DEBUG = os.getenv("FLASK_DEBUG", "0") == "1"
+    DEBUG = os.environ.get("FLASK_DEBUG", "0") == "1"

@@ -1,32 +1,31 @@
 from flask import Flask
-from flasgger import Swagger
-from flask_cors import CORS
-
 from .config import Config
 from .extensions import init_extensions
 from .routes import api_bp
 from .auth_routes import auth_bp
 from .mqtt_client import start_mqtt_client
+from flasgger import Swagger
+from flask_cors import CORS
 
 
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
-    # Enable CORS
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    # CORS
+    CORS(app, resources={r"/*": {"origins": "*"}})
 
-    # Initialize Mongo, JWT, MinIO, InfluxDB
+    # init DB, JWT, MinIO, Influx
     init_extensions(app)
 
-    # Swagger Docs
+    # Swagger
     Swagger(app)
 
-    # Routes
+    # Register API
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(api_bp, url_prefix="/api")
 
-    # MQTT Client
+    # MQTT
     app.mqtt = start_mqtt_client(app)
 
     return app
