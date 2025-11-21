@@ -7,7 +7,7 @@ from .extensions import get_db, get_influx
 from .services import update_robot_telemetry, update_task_status
 
 # 🔥 WebSocket
-from backend import socketio
+from app import socketio
 
 mqtt_client = None
 client_started = False

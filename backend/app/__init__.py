@@ -1,15 +1,17 @@
 from flask import Flask
 from flasgger import Swagger
 from flask_cors import CORS
+from flask_socketio import SocketIO
+
 from .config import Config
 from .extensions import init_extensions
 from .routes import api_bp
 from .auth_routes import auth_bp
-from .mqtt_client import start_mqtt_client
 
-from flask_socketio import SocketIO
-
-socketio = SocketIO(cors_allowed_origins="*")   # NEW
+# ---------------------------------------------------------
+# Create the SocketIO instance BEFORE importing mqtt_client
+# ---------------------------------------------------------
+socketio = SocketIO(cors_allowed_origins="*")
 
 
 def create_app():
@@ -19,20 +21,23 @@ def create_app():
     # CORS
     CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-    # Init DB, JWT, Minio, Influx
+    # Initialize DB | JWT | MinIO | Influx
     init_extensions(app)
 
-    # Attach socket to app
-    socketio.init_app(app)   # NEW
+    # Init socketio with app
+    socketio.init_app(app)
 
-    # Swagger
+    # Swagger UI
     Swagger(app)
 
-    # Routes
+    # Register REST APIs
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(api_bp, url_prefix="/api")
 
-    # MQTT
+    # ---------------------------------------------------------
+    # Import mqtt_client *AFTER* socketio is created
+    # ---------------------------------------------------------
+    from .mqtt_client import start_mqtt_client
     app.mqtt = start_mqtt_client(app)
 
     return app
