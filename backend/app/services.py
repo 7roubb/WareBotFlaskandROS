@@ -345,14 +345,12 @@ def soft_delete_robot(id: str):
 
 
 def update_robot_telemetry(robot_name: str, t: dict):
-    """
-    Telemetry snapshot → MongoDB live values
-    """
     db = get_db()
     t["updated_at"] = datetime.utcnow()
+    t["last_seen"] = datetime.utcnow()   # NEW LINE
 
     db.robots.update_one(
-        {"robot_id": robot_name, "deleted": False},   # <-- uses robot_id
+        {"robot_id": robot_name, "deleted": False},
         {"$set": t},
         upsert=False
     )
