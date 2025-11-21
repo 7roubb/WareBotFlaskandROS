@@ -11,7 +11,6 @@ from .extensions import init_extensions, get_db
 from .routes import api_bp
 from .auth_routes import auth_bp
 
-# Create socketio
 socketio = SocketIO(cors_allowed_origins="*")
 
 
@@ -26,14 +25,12 @@ def start_robot_offline_checker(app):
                 for r in robots:
                     last_seen = r.get("last_seen")
 
-                    # First time or expired
                     if not last_seen or now - last_seen > timedelta(seconds=10):
                         db.robots.update_one(
                             {"_id": r["_id"]},
                             {"$set": {"status": "OFFLINE"}}
                         )
 
-                        # Emit WS update
                         socketio.emit("telemetry", {
                             "robot": r["robot_id"],
                             "status": "OFFLINE"
@@ -48,11 +45,11 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+    # FULL CORS FIX
+    CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
     init_extensions(app)
 
-    # Register socketio inside app (VERY IMPORTANT)
     socketio.init_app(app)
     app.extensions["socketio"] = socketio
 
@@ -61,7 +58,6 @@ def create_app():
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(api_bp, url_prefix="/api")
 
-    # Import mqtt AFTER socketio is ready
     from .mqtt_client import start_mqtt_client
     app.mqtt = start_mqtt_client(app)
 

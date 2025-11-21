@@ -484,13 +484,24 @@ def dashboard_shelf_summary():
     results = []
 
     for s in shelves:
-        products = list(db.products.find({"shelf_id": s["id"], "deleted": False}))
-        total_items = sum(p["quantity"] for p in products)
+        shelf_id = str(s["_id"])     # 🔥 1) تحويل _id → string
+
+        # 🔥 2) المنتجات في DB تخزن shelf_id كـ string
+        products = list(db.products.find({
+            "shelf_id": shelf_id,
+            "deleted": False
+        }))
+
+        total_items = sum(p.get("quantity", 0) for p in products)
 
         results.append({
-            "shelf_id": s["id"],
-            "coords": (s["x_coord"], s["y_coord"]),
-            "level": s["level"],
+            "id": shelf_id,                            # 🔥 3) صحيح
+            "name": s.get("name", ""),                 # إضافة اسم الرف (مهم لواجهة React)
+            "coords": [
+                s.get("x_coord", 0),
+                s.get("y_coord", 0)
+            ],
+            "level": s.get("level", 1),
             "products": len(products),
             "total_items": total_items
         })
