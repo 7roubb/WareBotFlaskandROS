@@ -25,7 +25,7 @@ def create_app():
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(api_bp, url_prefix="/api")
 
-    # Start MQTT listener
-    start_mqtt_client(app)
+    # Start MQTT listener and attach it to app
+    app.mqtt = start_mqtt_client(app)
 
     return app
