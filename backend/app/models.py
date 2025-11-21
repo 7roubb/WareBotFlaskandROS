@@ -79,7 +79,7 @@ class ShelfUpdate(BaseModel):
 # =========================================================
 class RobotCreate(BaseModel):
     name: str
-    topic: str
+    robot_id: str               # <-- user will type: robot1
     available: bool = True
     status: str = "IDLE"
     current_shelf_id: Optional[str] = None
@@ -91,14 +91,14 @@ class RobotCreate(BaseModel):
             raise ValueError(f"status must be one of {ROBOT_STATUSES}")
         return v
 
-    @validator("name", "topic")
+    @validator("name", "robot_id")   # <-- FIXED HERE (no 'topic')
     def strip_text(cls, v):
         return v.strip()
 
 
 class RobotUpdate(BaseModel):
     name: Optional[str] = None
-    topic: Optional[str] = None
+    robot_id: Optional[str] = None   # <-- instead of topic
     available: Optional[bool] = None
     status: Optional[str] = None
     current_shelf_id: Optional[str] = None
@@ -111,7 +111,6 @@ class RobotUpdate(BaseModel):
         if v not in ROBOT_STATUSES:
             raise ValueError(f"status must be one of {ROBOT_STATUSES}")
         return v
-
 
 # =========================================================
 # ROBOT TELEMETRY (USED WITH INFLUXDB)

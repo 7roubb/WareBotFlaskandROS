@@ -2,6 +2,7 @@ from functools import wraps
 from flask import Blueprint, request, jsonify, current_app
 from pydantic import ValidationError
 from flask_jwt_extended import jwt_required, get_jwt
+from flask_cors import cross_origin
 import json
 
 from .models import (
@@ -25,7 +26,8 @@ from .services import (
     upload_image_to_minio, delete_image_from_minio, update_product_images
 )
 
-from .extensions import get_db, minio_client
+from .extensions import get_db
+from .extensions import get_influx
 
 api_bp = Blueprint("api", __name__)
 
@@ -100,8 +102,6 @@ def search_product_route():
 # =========================================================
 # PRODUCT IMAGES
 # =========================================================
-from flask_cors import cross_origin
-
 @api_bp.route("/products/<product_id>/images", methods=["POST", "OPTIONS"])
 @cross_origin()
 @admin_required
@@ -290,6 +290,15 @@ def shelf_products_route(id):
 @api_bp.route("/robots", methods=["POST"])
 @admin_required
 def create_robot_route():
+    """
+    Create a robot using only:
+    {
+        "name": "Robot A",
+        "robot_id": "robot1"
+    }
+    The backend generates:
+        robots/mp400/robot1/status
+    """
     try:
         data = RobotCreate(**request.json).dict()
     except ValidationError as e:
@@ -297,9 +306,10 @@ def create_robot_route():
 
     robot = create_robot(data)
 
-    # Subscribe to robot MQTT topic
-    topic = data["topic"]
+    # Auto subscribe to MQTT topic
+    topic = robot["topic"]     # robots/mp400/<id>/status
     mqtt_client = current_app.mqtt
+
     if mqtt_client:
         mqtt_client.subscribe(topic)
         current_app.logger.info(f"[MQTT] Subscribed to {topic}")
@@ -325,8 +335,18 @@ def update_robot_route(id):
         data = RobotUpdate(**request.json).dict(exclude_none=True)
     except ValidationError as e:
         return handle_validation_error(e)
-    result = update_robot(id, data)
-    return jsonify(result) if result else ({"error": "not_found"}, 404)
+
+    updated = update_robot(id, data)
+
+    # If robot_id is changed → resubscribe
+    if "robot_id" in data:
+        new_topic = updated["topic"]
+        mqtt_client = current_app.mqtt
+        if mqtt_client:
+            mqtt_client.subscribe(new_topic)
+            current_app.logger.info(f"[MQTT] Resubscribed to {new_topic}")
+
+    return jsonify(updated) if updated else ({"error": "not_found"}, 404)
 
 
 @api_bp.route("/robots/<id>", methods=["DELETE"])
@@ -337,20 +357,34 @@ def delete_robot_route(id):
     return {"status": "deleted"}
 
 
-# Subscribe to new telemetry topic manually
-@api_bp.route("/robots/monitor", methods=["POST"])
-@admin_required
-def monitor_robot_topic_route():
-    topic = request.json.get("topic")
-    if not topic:
-        return {"error": "invalid_topic"}, 400
+@api_bp.route("/robots/<robot_id>/telemetry/latest", methods=["GET"])
+def api_get_latest_influx(robot_id):
+    influx_client, write_api = get_influx()
 
-    mqtt_client = current_app.mqtt
-    if mqtt_client:
-        mqtt_client.subscribe(topic)
-        return {"status": "subscribed", "topic": topic}
+    # Get query API from client
+    query_api = influx_client.query_api()
+    bucket = current_app.config["INFLUX_BUCKET"]
 
-    return {"error": "mqtt_not_initialized"}, 500
+    query = f'''
+    from(bucket: "{bucket}")
+        |> range(start: -24h)
+        |> filter(fn: (r) => r["robot"] == "{robot_id}")
+        |> filter(fn: (r) => r["_measurement"] == "robot_telemetry")
+        |> last()
+    '''
+
+    tables = query_api.query(query)
+    latest = {}
+
+    for table in tables:
+        for record in table.records:
+            latest[record.get_field()] = record.get_value()
+            latest["time"] = record.get_time().isoformat()
+
+    if not latest:
+        return {"error": "not_found"}, 404
+
+    return latest
 
 
 # =========================================================
@@ -375,7 +409,7 @@ def create_task_route():
         desc=data.get("description")
     )
 
-    # Publish task to robot
+    # Publish task to robot (MQTT)
     topic = f"robots/mp400/{task['assigned_robot_name']}/task"
     payload = json.dumps({
         "task_id": task["id"],

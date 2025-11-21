@@ -262,21 +262,37 @@ def soft_delete_shelf(id: str):
 # ROBOT SERVICES + TELEMETRY (Mongo + InfluxDB)
 # =========================================================
 def create_robot(data: dict):
+    """
+    Create a robot by giving only:
+    - name
+    - robot_id  (example: robot1)
+
+    The system will generate the MQTT topic automatically:
+        robots/mp400/<robot_id>/status
+    """
     db = get_db()
     now = datetime.utcnow()
 
+    robot_id = data["robot_id"].strip()
+    topic = f"robots/mp400/{robot_id}/status"       # <-- auto topic
+
     doc = {
         "name": data["name"],
-        "topic": data["topic"],
+        "robot_id": robot_id,
+        "topic": topic,
+
         "available": data.get("available", True),
         "status": data.get("status", "IDLE"),
         "current_shelf_id": data.get("current_shelf_id"),
+
+        # Telemetry fields
         "cpu_usage": None,
         "ram_usage": None,
         "battery_level": None,
         "temperature": None,
         "x": None,
         "y": None,
+
         "created_at": now,
         "updated_at": now,
         "deleted": False,
@@ -307,6 +323,11 @@ def update_robot(id: str, data: dict):
     except:
         return None
 
+    # If robot_id is changed, regenerate topic
+    if "robot_id" in data:
+        robot_id = data["robot_id"].strip()
+        data["topic"] = f"robots/mp400/{robot_id}/status"
+
     data["updated_at"] = datetime.utcnow()
     db.robots.update_one({"_id": oid, "deleted": False}, {"$set": data})
     return get_robot(id)
@@ -324,17 +345,17 @@ def soft_delete_robot(id: str):
 
 
 def update_robot_telemetry(robot_name: str, t: dict):
-    """Snapshot → MongoDB"""
+    """
+    Telemetry snapshot → MongoDB live values
+    """
     db = get_db()
-
     t["updated_at"] = datetime.utcnow()
 
     db.robots.update_one(
-        {"name": robot_name, "deleted": False},
+        {"robot_id": robot_name, "deleted": False},   # <-- uses robot_id
         {"$set": t},
         upsert=False
     )
-
 
 def write_robot_telemetry_influx(robot_name: str, t: dict):
     """Historical → InfluxDB"""
