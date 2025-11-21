@@ -2,47 +2,19 @@ from typing import Optional, List, Dict
 from pydantic import BaseModel, Field, validator
 from datetime import datetime
 
-# ---------- Enum-like ----------
+# -------------------------------------
+# Robot Status Enum
+# -------------------------------------
 ROBOT_STATUSES = {"IDLE", "BUSY", "ERROR", "OFFLINE"}
 
 
-# ---------- Product ----------
+# =========================================================
+# PRODUCT MODELS
+# =========================================================
 class ProductCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     sku: str = Field(..., min_length=1, max_length=100)
     quantity: int = Field(ge=0)
-
-    # Extra details
-    category: Optional[str] = Field(default=None, max_length=100)
-    brand: Optional[str] = Field(default=None, max_length=100)
-    price: Optional[float] = Field(default=None, ge=0)
-    weight_kg: Optional[float] = Field(default=None, ge=0)
-    dimensions_cm: Optional[Dict[str, float]] = Field(
-        default=None,
-        description="e.g. {\"width\": 10, \"height\": 20, \"depth\": 5}",
-    )
-    barcode: Optional[str] = Field(default=None, max_length=100)
-
-    # Images: URLs (you can store S3 / local server / CDN URLs)
-    main_image_url: Optional[str] = None
-    image_urls: List[str] = Field(default_factory=list)
-
-    # Shelf relation
-    shelf_id: Optional[str] = None
-
-    description: Optional[str] = Field(default=None, max_length=1000)
-
-    @validator("name", "sku", "category", "brand", "barcode", pre=True, always=True)
-    def strip_strings(cls, v):
-        if v is None:
-            return v
-        return v.strip()
-
-
-class ProductUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
-    sku: Optional[str] = Field(default=None, min_length=1, max_length=100)
-    quantity: Optional[int] = Field(default=None, ge=0)
 
     category: Optional[str] = Field(default=None, max_length=100)
     brand: Optional[str] = Field(default=None, max_length=100)
@@ -52,20 +24,41 @@ class ProductUpdate(BaseModel):
     barcode: Optional[str] = Field(default=None, max_length=100)
 
     main_image_url: Optional[str] = None
-    image_urls: Optional[List[str]] = None
+    image_urls: List[str] = Field(default_factory=list)
+    shelf_id: Optional[str] = None
+    description: Optional[str] = Field(default=None, max_length=1000)
 
+    @validator("*", pre=True)
+    def strip_all(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    sku: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    quantity: Optional[int] = Field(default=None, ge=0)
+    category: Optional[str] = None
+    brand: Optional[str] = None
+    price: Optional[float] = Field(default=None, ge=0)
+    weight_kg: Optional[float] = Field(default=None, ge=0)
+    dimensions_cm: Optional[Dict[str, float]] = None
+    barcode: Optional[str] = None
+    main_image_url: Optional[str] = None
+    image_urls: Optional[List[str]] = None
     shelf_id: Optional[str] = None
     description: Optional[str] = Field(default=None, max_length=1000)
 
 
-# ---------- Shelf ----------
+# =========================================================
+# SHELF MODELS
+# =========================================================
 class ShelfCreate(BaseModel):
     warehouse_id: str
     x_coord: int
     y_coord: int
     level: int
     available: bool = True
-    status: str = "IDLE"  # IDLE, IN_USE, BLOCKED...
+    status: str = "IDLE"
 
     @validator("warehouse_id", "status")
     def strip_strings(cls, v):
@@ -81,7 +74,9 @@ class ShelfUpdate(BaseModel):
     status: Optional[str] = None
 
 
-# ---------- Robot ----------
+# =========================================================
+# ROBOT MODELS
+# =========================================================
 class RobotCreate(BaseModel):
     name: str
     topic: str
@@ -96,8 +91,8 @@ class RobotCreate(BaseModel):
             raise ValueError(f"status must be one of {ROBOT_STATUSES}")
         return v
 
-    @validator("name")
-    def strip_name(cls, v):
+    @validator("name", "topic")
+    def strip_text(cls, v):
         return v.strip()
 
 
@@ -118,7 +113,9 @@ class RobotUpdate(BaseModel):
         return v
 
 
-# ---------- Robot Telemetry (MQTT) ----------
+# =========================================================
+# ROBOT TELEMETRY (USED WITH INFLUXDB)
+# =========================================================
 class RobotTelemetry(BaseModel):
     cpu_usage: float = Field(..., ge=0, le=100)
     ram_usage: float = Field(..., ge=0, le=100)
@@ -127,6 +124,8 @@ class RobotTelemetry(BaseModel):
     x: float
     y: float
     status: Optional[str] = None
+
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
 
     @validator("status")
     def validate_status(cls, v):
@@ -138,7 +137,9 @@ class RobotTelemetry(BaseModel):
         return v
 
 
-# ---------- Admin / Auth ----------
+# =========================================================
+# AUTH MODELS
+# =========================================================
 class AdminCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=6, max_length=128)
@@ -156,16 +157,25 @@ class AdminLogin(BaseModel):
     def strip_username(cls, v):
         return v.strip()
 
+
+# =========================================================
+# TASK MODELS
+# =========================================================
 class TaskCreate(BaseModel):
-    shelf_id: str = Field(..., description="Target shelf to pick/place")
+    shelf_id: str
     priority: int = Field(default=1, ge=1, le=10)
     description: Optional[str] = None
 
+
+# =========================================================
+# STOCK MODELS
+# =========================================================
 class ProductTransactionCreate(BaseModel):
     product_id: str
     quantity: int = Field(..., gt=0)
     action: str = Field(..., pattern="^(PICK|RETURN|ADJUST)$")
     description: Optional[str] = None
+
 
 class StockReturn(BaseModel):
     product_id: str
@@ -177,3 +187,14 @@ class StockAdjust(BaseModel):
     product_id: str
     new_quantity: int = Field(..., ge=0)
     reason: Optional[str] = None
+
+
+# =========================================================
+# IMAGE MODELS
+# =========================================================
+class SetMainImage(BaseModel):
+    image_url: str
+
+
+class DeleteImage(BaseModel):
+    index: int = Field(..., ge=0)

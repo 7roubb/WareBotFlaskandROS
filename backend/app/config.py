@@ -1,35 +1,47 @@
 import os
-from datetime import timedelta
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env file
+
 
 class Config:
+    # -----------------------------
     # MongoDB
+    # -----------------------------
     MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongo:27017/warebot_db")
     MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "warebot_db")
 
+    # -----------------------------
     # JWT
-    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "CHANGE_ME_SECRET")
-    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=2)
+    # -----------------------------
+    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "SUPER_SECRET_KEY")
 
-    # Swagger
-    SWAGGER = {
-        "title": "Warebot API",
-        "uiversion": 3,
-        "openapi": "3.0.2",
-    }
-
-    # MinIO (S3-Compatible Storage)
+    # -----------------------------
+    # MinIO
+    # -----------------------------
     MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
     MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "admin")
     MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "admin123")
     MINIO_BUCKET = os.getenv("MINIO_BUCKET", "products")
-    MINIO_SECURE = False  # inside Docker network, so not https
+    MINIO_SECURE = os.getenv("MINIO_SECURE", "False").lower() == "true"
 
-    # MQTT / HiveMQ
+    # -----------------------------
+    # MQTT
+    # -----------------------------
     MQTT_HOST = os.getenv("MQTT_HOST", "hivemq")
     MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
-    MQTT_USERNAME = os.getenv("MQTT_USERNAME", "")
-    MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
-    MQTT_STATUS_TOPIC = os.getenv("MQTT_STATUS_TOPIC", "robots/mp400/+/status")
+    MQTT_USERNAME = os.getenv("MQTT_USERNAME")
+    MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 
-    # Debug
-    DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    # -----------------------------
+    # InfluxDB (Time-Series)
+    # -----------------------------
+    INFLUX_URL = os.getenv("INFLUX_URL", "http://influxdb:8086")
+    INFLUX_TOKEN = os.getenv("INFLUX_TOKEN", "influx-token")
+    INFLUX_ORG = os.getenv("INFLUX_ORG", "warebot")
+    INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "telemetry")
+
+    # -----------------------------
+    # Flask debug
+    # -----------------------------
+    DEBUG = os.getenv("FLASK_DEBUG", "0") == "1"

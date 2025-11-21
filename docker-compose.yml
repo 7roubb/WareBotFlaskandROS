@@ -11,6 +11,7 @@ services:
       - mongo
       - hivemq
       - minio
+      - influxdb
     ports:
       - "5000:5000"
     networks:
@@ -32,8 +33,8 @@ services:
     container_name: warebot-hivemq
     restart: always
     ports:
-      - "1883:1883"   # MQTT
-      - "8080:8080"   # HiveMQ dashboard
+      - "1883:1883"     # MQTT Broker
+      - "8080:8080"     # HiveMQ Dashboard
     networks:
       - warebot-net
 
@@ -41,7 +42,7 @@ services:
     image: minio/minio
     container_name: warebot-minio
     restart: always
-    command: server /data --console-address ":9001"
+    command: server /data --console-address ":9001" --address ":9000"
     environment:
       MINIO_ROOT_USER: admin
       MINIO_ROOT_PASSWORD: admin123
@@ -53,9 +54,39 @@ services:
     networks:
       - warebot-net
 
+  influxdb:
+    image: influxdb:2.7
+    container_name: warebot-influxdb
+    restart: always
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin123
+      DOCKER_INFLUXDB_INIT_ORG: warebot
+      DOCKER_INFLUXDB_INIT_BUCKET: telemetry
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: influx-token
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    networks:
+      - warebot-net
+
+  chronograf:
+    image: chronograf:latest
+    container_name: warebot-chronograf
+    restart: always
+    ports:
+      - "8888:8888"
+    depends_on:
+      - influxdb
+    networks:
+      - warebot-net
+
 networks:
   warebot-net:
 
 volumes:
   mongo_data:
   minio_data:
+  influxdb_data:

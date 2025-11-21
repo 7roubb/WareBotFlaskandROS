@@ -8,24 +8,25 @@ from .routes import api_bp
 from .auth_routes import auth_bp
 from .mqtt_client import start_mqtt_client
 
+
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
-    # Allow React / Bolt frontend
+    # Enable CORS
     CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-    # Initialize MongoDB, JWT, MinIO
+    # Initialize Mongo, JWT, MinIO, InfluxDB
     init_extensions(app)
 
     # Swagger Docs
     Swagger(app)
 
-    # Register routes
+    # Routes
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(api_bp, url_prefix="/api")
 
-    # Start MQTT listener and attach it to app
+    # MQTT Client
     app.mqtt = start_mqtt_client(app)
 
     return app

@@ -1,43 +1,50 @@
 import json
 import paho.mqtt.client as mqtt
 from flask import current_app
-from .extensions import get_db
+
+from influxdb_client import Point
+from .extensions import get_db, get_influx
 from .services import update_robot_telemetry, update_task_status
+
 
 mqtt_client = None
 client_started = False
 
-# ===========================================
+
+# =========================================================
 # MQTT CALLBACKS
-# ===========================================
+# =========================================================
 def on_connect(client, userdata, flags, reason_code, properties=None):
     app = userdata["app"]
     app.logger.info(f"[MQTT] Connected with code: {reason_code}")
 
-    # Subscriptions
+    # Subscribe to robot telemetry + task updates
     client.subscribe("robots/mp400/+/status")
     client.subscribe("robots/mp400/+/task_status")
     client.subscribe("warehouse/map")
 
-    app.logger.info("[MQTT] Subscribed to robot and map topics")
+    app.logger.info("[MQTT] Subscribed to topics")
 
 
 def on_message(client, userdata, msg):
     app = userdata["app"]
     topic = msg.topic
-    payload_str = msg.payload.decode("utf-8")
+    payload = msg.payload.decode("utf-8")
 
     db = get_db()
-    app.logger.debug(f"[MQTT] Message → {topic}: {payload_str}")
+    influx_client, write_api = get_influx()
 
-    # ----------------------------
-    # ROBOT TELEMETRY
-    # ----------------------------
+    app.logger.debug(f"[MQTT] → {topic}: {payload}")
+
+    # -----------------------------------------------------
+    # TELEMETRY: robots/mp400/<robot>/status
+    # -----------------------------------------------------
     if topic.startswith("robots/mp400/") and topic.endswith("/status"):
         try:
             robot_name = topic.split("/")[2]
-            data = json.loads(payload_str)
+            data = json.loads(payload)
 
+            # Snapshot (latest only) → MongoDB
             telemetry = {
                 "cpu_usage": data.get("cpu_usage"),
                 "ram_usage": data.get("ram_usage"),
@@ -45,54 +52,75 @@ def on_message(client, userdata, msg):
                 "temperature": data.get("temperature"),
                 "x": data.get("x"),
                 "y": data.get("y"),
-                "status": data.get("status", "IDLE")
+                "status": data.get("status", "IDLE"),
             }
             update_robot_telemetry(robot_name, telemetry)
+
+            # Full history → InfluxDB
+            point = (
+                Point("robot_telemetry")
+                .tag("robot", robot_name)
+                .field("cpu_usage", telemetry["cpu_usage"])
+                .field("ram_usage", telemetry["ram_usage"])
+                .field("battery_level", telemetry["battery_level"])
+                .field("temperature", telemetry["temperature"])
+                .field("x", telemetry["x"])
+                .field("y", telemetry["y"])
+                .field("status_code", status_to_code(telemetry["status"]))
+            )
+            write_api.write(
+                bucket=current_app.config["INFLUX_BUCKET"],
+                record=point
+            )
 
         except Exception as e:
             app.logger.error(f"[MQTT] Telemetry error: {e}")
 
-    # ----------------------------
-    # TASK STATUS
-    # ----------------------------
+    # -----------------------------------------------------
+    # TASK STATUS UPDATE
+    # robots/mp400/<robot>/task_status
+    # -----------------------------------------------------
     elif topic.startswith("robots/mp400/") and topic.endswith("/task_status"):
         try:
-            data = json.loads(payload_str)
-            if data.get("task_id") and data.get("status"):
-                update_task_status(data["task_id"], data["status"])
-        except Exception as e:
-            app.logger.error(f"[MQTT] Task error: {e}")
+            data = json.loads(payload)
+            task_id = data.get("task_id")
+            status = data.get("status")
 
-    # ----------------------------
+            if task_id and status:
+                update_task_status(task_id, status)
+
+        except Exception as e:
+            app.logger.error(f"[MQTT] Task status error: {e}")
+
+    # -----------------------------------------------------
     # MERGED MAP
-    # ----------------------------
+    # -----------------------------------------------------
     elif topic == "warehouse/map":
         try:
-            data = json.loads(payload_str)
+            data = json.loads(payload)
             db.maps.update_one(
                 {"name": "merged_map"},
                 {"$set": data},
                 upsert=True
             )
         except Exception as e:
-            app.logger.error(f"[MQTT] Map error: {e}")
+            app.logger.error(f"[MQTT] Map update error: {e}")
 
-    # ----------------------------
+    # -----------------------------------------------------
     # CUSTOM ROBOT TOPICS
-    # ----------------------------
+    # -----------------------------------------------------
     else:
-        robot = db.robots.find_one({"topic": topic, "deleted": False})
-        if robot:
-            try:
-                data = json.loads(payload_str)
-                app.logger.info(f"[MQTT] Custom topic {topic}: {data}")
-            except Exception as e:
-                app.logger.error(f"[MQTT] Custom topic error: {e}")
+        try:
+            robot = db.robots.find_one({"topic": topic, "deleted": False})
+            if robot:
+                app.logger.info(f"[MQTT] Custom topic {topic}: {payload}")
+        except Exception as e:
+            app.logger.error(f"[MQTT] Custom topic error: {e}")
 
 
-# ===========================================
-# START MQTT CLIENT (THIS WAS MISSING!)
-# ===========================================
+# =========================================================
+# START MQTT CLIENT
+# =========================================================
 def start_mqtt_client(app):
     global mqtt_client, client_started
 
@@ -105,17 +133,16 @@ def start_mqtt_client(app):
         protocol=mqtt.MQTTv5
     )
 
-    # Set callbacks
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
 
-    # Auth
+    # Login
     username = app.config.get("MQTT_USERNAME")
     password = app.config.get("MQTT_PASSWORD")
     if username:
         mqtt_client.username_pw_set(username, password)
 
-    # Connect
+    # Connect to broker
     mqtt_client.connect(
         app.config["MQTT_HOST"],
         int(app.config["MQTT_PORT"]),
@@ -129,13 +156,28 @@ def start_mqtt_client(app):
     return mqtt_client
 
 
-# ===========================================
-# PUBLISH WRAPPER
-# ===========================================
+# =========================================================
+# HELPERS
+# =========================================================
 def publish_message(topic, payload):
+    """Publish JSON payload to a topic"""
     if not mqtt_client:
-        print("[MQTT] ERROR: MQTT client not running")
+        print("[MQTT] ERROR: Client not running")
         return False
 
     mqtt_client.publish(topic, payload)
     return True
+
+
+def status_to_code(status: str) -> int:
+    """Convert status string → numeric for InfluxDB graphs"""
+    s = status.upper()
+    if s == "IDLE":
+        return 0
+    if s == "BUSY":
+        return 1
+    if s == "ERROR":
+        return 2
+    if s == "OFFLINE":
+        return 3
+    return -1

@@ -2,17 +2,23 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from bson import ObjectId
 from werkzeug.security import generate_password_hash, check_password_hash
-from math import sqrt
+import uuid
+import io
 
-from .extensions import get_db
+from influxdb_client import Point
+from flask import current_app
+
+from .extensions import get_db, minio_client, get_influx
+from .models import ROBOT_STATUSES
 
 
-# ---------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------
-def serialize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+# =========================================================
+# UTILITIES
+# =========================================================
+def serialize(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert MongoDB document -> serializable JSON"""
     if not doc:
-        return doc
+        return None
     doc["id"] = str(doc["_id"])
     doc.pop("_id", None)
     return doc
@@ -24,6 +30,7 @@ def serialize_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 def create_product(data: dict) -> dict:
     db = get_db()
     now = datetime.utcnow()
+
     doc = {
         "name": data["name"],
         "sku": data["sku"],
@@ -42,181 +49,161 @@ def create_product(data: dict) -> dict:
         "updated_at": now,
         "deleted": False,
     }
+
     res = db.products.insert_one(doc)
-    return serialize_doc(db.products.find_one({"_id": res.inserted_id}))
+    return serialize(db.products.find_one({"_id": res.inserted_id}))
 
 
 def list_products() -> List[dict]:
     db = get_db()
-    docs = db.products.find({"deleted": False})
-    return [serialize_doc(d) for d in docs]
+    return [serialize(p) for p in db.products.find({"deleted": False})]
 
 
-def get_product(product_id: str) -> Optional[dict]:
+def get_product(id: str) -> Optional[dict]:
     db = get_db()
     try:
-        oid = ObjectId(product_id)
-    except Exception:
+        oid = ObjectId(id)
+    except:
         return None
-    doc = db.products.find_one({"_id": oid, "deleted": False})
-    return serialize_doc(doc) if doc else None
+    return serialize(db.products.find_one({"_id": oid, "deleted": False}))
 
 
-def update_product(product_id: str, data: dict) -> Optional[dict]:
+def update_product(id: str, data: dict) -> Optional[dict]:
     db = get_db()
     try:
-        oid = ObjectId(product_id)
-    except Exception:
+        oid = ObjectId(id)
+    except:
         return None
+
     data["updated_at"] = datetime.utcnow()
     db.products.update_one({"_id": oid, "deleted": False}, {"$set": data})
-    return get_product(product_id)
+    return get_product(id)
 
 
-def soft_delete_product(product_id: str) -> bool:
+def soft_delete_product(id: str) -> bool:
     db = get_db()
     try:
-        oid = ObjectId(product_id)
-    except Exception:
+        oid = ObjectId(id)
+    except:
         return False
+
     res = db.products.update_one({"_id": oid}, {"$set": {"deleted": True}})
     return res.modified_count > 0
 
 
-def search_products_by_name(query: str) -> List[dict]:
+def search_products_by_name(q: str) -> List[dict]:
     db = get_db()
-    docs = db.products.find({
-        "deleted": False,
-        "name": {"$regex": query, "$options": "i"}
-    })
-    return [serialize_doc(d) for d in docs]
+    docs = db.products.find(
+        {"deleted": False, "name": {"$regex": q, "$options": "i"}}
+    )
+    return [serialize(p) for p in docs]
 
 
-def get_shelf_for_product(product_id: str) -> Optional[dict]:
-    product = get_product(product_id)
-    if not product:
-        return None
-
-    shelf_id = product.get("shelf_id")
-    if not shelf_id:
-        return None
-
-    return get_shelf(shelf_id)
+def get_products_for_shelf(shelf_id: str) -> List[dict]:
+    db = get_db()
+    docs = db.products.find({"deleted": False, "shelf_id": shelf_id})
+    return [serialize(p) for p in docs]
 
 
 # =========================================================
-# STOCK MOVEMENTS (PICK / RETURN / ADJUST)
+# STOCK MANAGEMENT
 # =========================================================
-def record_product_transaction(data: dict):
+def record_transaction(data: dict):
     db = get_db()
-    now = datetime.utcnow()
-
-    doc = {
-        "product_id": data["product_id"],
-        "action": data["action"],   # PICK / RETURN / ADJUST
-        "quantity": data["quantity"],
-        "timestamp": now,
-        "description": data.get("description"),
-        "shelf_id": data.get("shelf_id"),
-        "old_quantity": data["old_quantity"],
-        "new_quantity": data["new_quantity"],
-    }
-
-    db.product_transactions.insert_one(doc)
-    return doc
+    db.product_transactions.insert_one(data)
 
 
-def subtract_from_product_stock(product_id: str, qty: int, description=None):
+def subtract_from_product_stock(product_id: str, qty: int, desc=None):
     db = get_db()
-
     product = get_product(product_id)
     if not product:
         raise ValueError("product_not_found")
 
-    old_qty = product["quantity"]
-    if qty > old_qty:
+    if qty > product["quantity"]:
         raise ValueError("not_enough_stock")
 
-    new_qty = old_qty - qty
+    before = product["quantity"]
+    after = before - qty
 
     db.products.update_one(
         {"_id": ObjectId(product_id)},
-        {"$set": {"quantity": new_qty, "updated_at": datetime.utcnow()}}
+        {"$set": {"quantity": after, "updated_at": datetime.utcnow()}}
     )
 
-    record_product_transaction({
+    record_transaction({
         "product_id": product_id,
-        "quantity": qty,
         "action": "PICK",
-        "old_quantity": old_qty,
-        "new_quantity": new_qty,
+        "quantity": qty,
+        "timestamp": datetime.utcnow(),
+        "old_quantity": before,
+        "new_quantity": after,
+        "description": desc,
         "shelf_id": product.get("shelf_id"),
-        "description": description
     })
 
-    return new_qty
+    return after
 
 
-def return_product_stock(product_id: str, quantity: int, description: str | None):
+def return_product_stock(product_id: str, qty: int, desc=None):
     db = get_db()
-
-    product = get_product(product_id)
-    if not product:
-        raise ValueError("product_not_found")
-
-    new_qty = product["quantity"] + quantity
-
-    db.products.update_one(
-        {"_id": ObjectId(product_id)},
-        {"$set": {"quantity": new_qty, "updated_at": datetime.utcnow()}}
-    )
-
-    db.product_transactions.insert_one({
-        "product_id": product_id,
-        "type": "RETURN",
-        "quantity": quantity,
-        "before": product["quantity"],
-        "after": new_qty,
-        "description": description,
-        "created_at": datetime.utcnow()
-    })
-
-    return get_product(product_id)
-
-
-def adjust_product_stock(product_id: str, new_quantity: int, reason: str | None):
-    db = get_db()
-
     product = get_product(product_id)
     if not product:
         raise ValueError("product_not_found")
 
     before = product["quantity"]
+    after = before + qty
 
     db.products.update_one(
         {"_id": ObjectId(product_id)},
-        {"$set": {"quantity": new_quantity, "updated_at": datetime.utcnow()}}
+        {"$set": {"quantity": after, "updated_at": datetime.utcnow()}}
     )
 
-    db.product_transactions.insert_one({
+    record_transaction({
         "product_id": product_id,
-        "type": "ADJUST",
-        "quantity": abs(new_quantity - before),
-        "before": before,
-        "after": new_quantity,
-        "reason": reason,
-        "created_at": datetime.utcnow()
+        "action": "RETURN",
+        "quantity": qty,
+        "timestamp": datetime.utcnow(),
+        "old_quantity": before,
+        "new_quantity": after,
+        "description": desc,
+        "shelf_id": product.get("shelf_id"),
+    })
+
+    return get_product(product_id)
+
+
+def adjust_product_stock(product_id: str, new_qty: int, reason=None):
+    db = get_db()
+    product = get_product(product_id)
+    if not product:
+        raise ValueError("product_not_found")
+
+    before = product["quantity"]
+    db.products.update_one(
+        {"_id": ObjectId(product_id)},
+        {"$set": {"quantity": new_qty, "updated_at": datetime.utcnow()}}
+    )
+
+    record_transaction({
+        "product_id": product_id,
+        "action": "ADJUST",
+        "quantity": abs(before - new_qty),
+        "timestamp": datetime.utcnow(),
+        "old_quantity": before,
+        "new_quantity": new_qty,
+        "description": reason,
     })
 
     return get_product(product_id)
 
 
 # =========================================================
-# SHELF SERVICES
+# SHELVES
 # =========================================================
-def create_shelf(data: dict) -> dict:
+def create_shelf(data: dict):
     db = get_db()
     now = datetime.utcnow()
+
     doc = {
         "warehouse_id": data["warehouse_id"],
         "x_coord": data["x_coord"],
@@ -228,228 +215,259 @@ def create_shelf(data: dict) -> dict:
         "updated_at": now,
         "deleted": False,
     }
+
     res = db.shelves.insert_one(doc)
-    return serialize_doc(db.shelves.find_one({"_id": res.inserted_id}))
+    return serialize(db.shelves.find_one({"_id": res.inserted_id}))
 
 
-def list_shelves() -> List[dict]:
-    db = get_db()
-    docs = db.shelves.find({"deleted": False})
-    return [serialize_doc(d) for d in docs]
-
-
-def get_shelf(shelf_id: str) -> Optional[dict]:
+def get_shelf(id: str):
     db = get_db()
     try:
-        oid = ObjectId(shelf_id)
-    except Exception:
+        oid = ObjectId(id)
+    except:
         return None
-    doc = db.shelves.find_one({"_id": oid, "deleted": False})
-    return serialize_doc(doc) if doc else None
+    return serialize(db.shelves.find_one({"_id": oid, "deleted": False}))
 
 
-def update_shelf(shelf_id: str, data: dict) -> Optional[dict]:
+def list_shelves():
+    db = get_db()
+    return [serialize(s) for s in db.shelves.find({"deleted": False})]
+
+
+def update_shelf(id: str, data: dict):
     db = get_db()
     try:
-        oid = ObjectId(shelf_id)
-    except Exception:
+        oid = ObjectId(id)
+    except:
         return None
+
     data["updated_at"] = datetime.utcnow()
     db.shelves.update_one({"_id": oid, "deleted": False}, {"$set": data})
-    return get_shelf(shelf_id)
+    return get_shelf(id)
 
 
-def soft_delete_shelf(shelf_id: str) -> bool:
+def soft_delete_shelf(id: str):
     db = get_db()
     try:
-        oid = ObjectId(shelf_id)
-    except Exception:
+        oid = ObjectId(id)
+    except:
         return False
+
     res = db.shelves.update_one({"_id": oid}, {"$set": {"deleted": True}})
     return res.modified_count > 0
 
 
-def get_products_for_shelf(shelf_id: str) -> List[dict]:
-    db = get_db()
-    docs = db.products.find({"deleted": False, "shelf_id": shelf_id})
-    return [serialize_doc(d) for d in docs]
-
-
 # =========================================================
-# ROBOT SERVICES
+# ROBOT SERVICES + TELEMETRY (Mongo + InfluxDB)
 # =========================================================
-def create_robot(data: dict) -> dict:
+def create_robot(data: dict):
     db = get_db()
     now = datetime.utcnow()
+
     doc = {
         "name": data["name"],
+        "topic": data["topic"],
         "available": data.get("available", True),
         "status": data.get("status", "IDLE"),
         "current_shelf_id": data.get("current_shelf_id"),
-        "created_at": now,
-        "updated_at": now,
-        "deleted": False,
         "cpu_usage": None,
         "ram_usage": None,
         "battery_level": None,
         "temperature": None,
         "x": None,
         "y": None,
+        "created_at": now,
+        "updated_at": now,
+        "deleted": False,
     }
+
     res = db.robots.insert_one(doc)
-    return serialize_doc(db.robots.find_one({"_id": res.inserted_id}))
+    return serialize(db.robots.find_one({"_id": res.inserted_id}))
 
 
-def list_robots() -> List[dict]:
+def list_robots():
     db = get_db()
-    docs = db.robots.find({"deleted": False})
-    return [serialize_doc(d) for d in docs]
+    return [serialize(r) for r in db.robots.find({"deleted": False})]
 
 
-def get_robot(robot_id: str) -> Optional[dict]:
-    db = get_db()
-    try:
-        oid = ObjectId(robot_id)
-    except Exception:
-        return None
-    doc = db.robots.find_one({"_id": oid, "deleted": False})
-    return serialize_doc(doc) if doc else None
-
-
-def update_robot(robot_id: str, data: dict) -> Optional[dict]:
+def get_robot(id: str):
     db = get_db()
     try:
-        oid = ObjectId(robot_id)
-    except Exception:
+        oid = ObjectId(id)
+    except:
         return None
+    return serialize(db.robots.find_one({"_id": oid, "deleted": False}))
+
+
+def update_robot(id: str, data: dict):
+    db = get_db()
+    try:
+        oid = ObjectId(id)
+    except:
+        return None
+
     data["updated_at"] = datetime.utcnow()
     db.robots.update_one({"_id": oid, "deleted": False}, {"$set": data})
-    return get_robot(robot_id)
+    return get_robot(id)
 
 
-def soft_delete_robot(robot_id: str) -> bool:
+def soft_delete_robot(id: str):
     db = get_db()
     try:
-        oid = ObjectId(robot_id)
-    except Exception:
+        oid = ObjectId(id)
+    except:
         return False
+
     res = db.robots.update_one({"_id": oid}, {"$set": {"deleted": True}})
     return res.modified_count > 0
 
 
-def update_robot_telemetry(robot_name: str, telemetry: dict):
+def update_robot_telemetry(robot_name: str, t: dict):
+    """Snapshot → MongoDB"""
     db = get_db()
-    telemetry["updated_at"] = datetime.utcnow()
+
+    t["updated_at"] = datetime.utcnow()
+
     db.robots.update_one(
         {"name": robot_name, "deleted": False},
-        {"$set": telemetry},
-        upsert=False,
+        {"$set": t},
+        upsert=False
     )
 
 
-# =========================================================
-# TASK SYSTEM (Find Best Robot)
-# =========================================================
-def euclidean(x1, y1, x2, y2):
-    return sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2)
+def write_robot_telemetry_influx(robot_name: str, t: dict):
+    """Historical → InfluxDB"""
+    influx, write_api = get_influx()
+
+    point = (
+        Point("robot_telemetry")
+        .tag("robot", robot_name)
+        .field("cpu_usage", t["cpu_usage"])
+        .field("ram_usage", t["ram_usage"])
+        .field("battery_level", t["battery_level"])
+        .field("temperature", t["temperature"])
+        .field("x", t["x"])
+        .field("y", t["y"])
+        .field("status_code", status_to_code(t["status"]))
+        .time(datetime.utcnow())
+    )
+
+    write_api.write(
+        bucket=current_app.config["INFLUX_BUCKET"],
+        record=point
+    )
 
 
-def create_task_and_assign(shelf_id: str, priority: int, description: str | None):
+def status_to_code(status: str) -> int:
+    status = status.upper()
+    if status == "IDLE": return 0
+    if status == "BUSY": return 1
+    if status == "ERROR": return 2
+    if status == "OFFLINE": return 3
+    return -1
+
+
+# =========================================================
+# TASK SYSTEM
+# =========================================================
+def create_task_and_assign(shelf_id: str, priority: int, desc=None):
     db = get_db()
-
     try:
         oid = ObjectId(shelf_id)
-    except Exception:
+    except:
         raise ValueError("invalid_shelf_id")
 
     shelf = db.shelves.find_one({"_id": oid, "deleted": False})
     if not shelf:
         raise ValueError("shelf_not_found")
 
-    sx, sy = shelf["xCoord"], shelf["yCoord"]
-
     robots = list(db.robots.find({"deleted": False, "available": True}))
     if not robots:
         raise ValueError("no_available_robots")
 
-    best_robot = None
-    best_cost = float("inf")
+    sx, sy = shelf["x_coord"], shelf["y_coord"]
+
+    # Find best robot (distance + battery)
+    best = None
+    best_cost = 999999
 
     for r in robots:
         rx, ry = r.get("x"), r.get("y")
-        battery = r.get("battery", 100.0)
+        battery = r.get("battery_level", 100)
 
         if rx is None or ry is None:
             continue
 
-        dist = euclidean(rx, ry, sx, sy)
-        cost = dist * 0.7 + (100.0 - battery) * 0.3
+        dist = ((rx - sx) ** 2 + (ry - sy) ** 2) ** 0.5
+        cost = dist * 0.7 + (100 - battery) * 0.3
 
         if cost < best_cost:
             best_cost = cost
-            best_robot = r
+            best = r
 
-    if best_robot is None:
+    if not best:
         raise ValueError("no_suitable_robot")
 
     now = datetime.utcnow()
-    task_doc = {
-        "shelf_id": str(oid),
+
+    doc = {
+        "shelf_id": shelf_id,
         "priority": priority,
-        "description": description,
-        "assigned_robot_name": best_robot["name"],
-        "assigned_robot_id": best_robot["_id"],
+        "description": desc,
+        "assigned_robot_name": best["name"],
+        "assigned_robot_id": best["_id"],
         "status": "PENDING",
         "created_at": now,
         "updated_at": now,
     }
 
-    res = db.tasks.insert_one(task_doc)
-    return serialize_doc(db.tasks.find_one({"_id": res.inserted_id}))
+    res = db.tasks.insert_one(doc)
+    return serialize(db.tasks.find_one({"_id": res.inserted_id}))
+
+
+def list_tasks():
+    db = get_db()
+    return [serialize(t) for t in db.tasks.find({})]
 
 
 def update_task_status(task_id: str, status: str):
     db = get_db()
     try:
         oid = ObjectId(task_id)
-    except Exception:
+    except:
         return False
-    res = db.tasks.update_one(
+
+    db.tasks.update_one(
         {"_id": oid},
         {"$set": {"status": status, "updated_at": datetime.utcnow()}}
     )
-    return res.modified_count > 0
-
-
-def list_tasks() -> List[dict]:
-    db = get_db()
-    docs = db.tasks.find({})
-    return [serialize_doc(d) for d in docs]
+    return True
 
 
 # =========================================================
 # DASHBOARD SERVICES
 # =========================================================
-def dashboard_top_moving_products(limit=10):
+def dashboard_top_moving_products():
     db = get_db()
     pipeline = [
-        {"$match": {"type": "TAKE"}},
-        {"$group": {"_id": "$product_id", "total_taken": {"$sum": "$quantity"}}},
-        {"$sort": {"total_taken": -1}},
-        {"$limit": limit}
+        {"$match": {"action": "PICK"}},
+        {"$group": {"_id": "$product_id", "total": {"$sum": "$quantity"}}},
+        {"$sort": {"total": -1}},
+        {"$limit": 10},
     ]
-    return list(pipeline)
+    return list(db.product_transactions.aggregate(pipeline))
 
 
 def dashboard_shelf_summary():
     db = get_db()
     shelves = list(db.shelves.find({"deleted": False}))
-    result = []
+    results = []
 
     for s in shelves:
         products = list(db.products.find({"shelf_id": s["id"], "deleted": False}))
         total_items = sum(p["quantity"] for p in products)
-        result.append({
+
+        results.append({
             "shelf_id": s["id"],
             "coords": (s["x_coord"], s["y_coord"]),
             "level": s["level"],
@@ -457,44 +475,42 @@ def dashboard_shelf_summary():
             "total_items": total_items
         })
 
-    return result
+    return results
 
 
 def dashboard_daily_movements():
     db = get_db()
-    today = datetime.utcnow().date().isoformat()
+    today = datetime.utcnow().date()
+    start = datetime(today.year, today.month, today.day)
 
     pipeline = [
-        {"$match": {"created_at": {"$gte": datetime.fromisoformat(today)}}},
-        {"$group": {"_id": "$type", "qty": {"$sum": "$quantity"}}}
+        {"$match": {"timestamp": {"$gte": start}}},
+        {"$group": {"_id": "$action", "qty": {"$sum": "$quantity"}}},
     ]
-
-    return list(pipeline)
+    return list(db.product_transactions.aggregate(pipeline))
 
 
 # =========================================================
-# AUTH SERVICES (Admins)
+# ADMIN / AUTH
 # =========================================================
-def get_admin_by_username(username: str) -> Optional[dict]:
+def get_admin_by_username(username: str):
     db = get_db()
-    doc = db.admins.find_one({"username": username})
-    if not doc:
-        return None
-    return serialize_doc(doc)
+    return serialize(db.admins.find_one({"username": username}))
 
 
-def create_admin(username: str, password: str) -> dict:
+def create_admin(username: str, password: str):
     db = get_db()
     now = datetime.utcnow()
-    password_hash = generate_password_hash(password)
+
     doc = {
         "username": username,
-        "password_hash": password_hash,
+        "password_hash": generate_password_hash(password),
         "role": "ADMIN",
         "created_at": now,
     }
+
     res = db.admins.insert_one(doc)
-    return serialize_doc(db.admins.find_one({"_id": res.inserted_id}))
+    return serialize(db.admins.find_one({"_id": res.inserted_id}))
 
 
 def verify_admin_password(username: str, password: str) -> bool:
@@ -503,3 +519,59 @@ def verify_admin_password(username: str, password: str) -> bool:
     if not doc:
         return False
     return check_password_hash(doc["password_hash"], password)
+
+
+# =========================================================
+# MINIO IMAGE SERVICES
+# =========================================================
+def upload_image_to_minio(file_content: bytes, filename: str, product_id: str, content_type: str):
+    if not minio_client:
+        raise Exception("MinIO not initialized")
+
+    bucket = current_app.config["MINIO_BUCKET"]
+
+    object_name = f"products/{product_id}/{filename or uuid.uuid4()}.jpg"
+
+    minio_client.put_object(
+        bucket,
+        object_name,
+        data=io.BytesIO(file_content),
+        length=len(file_content),
+        content_type=content_type
+    )
+
+    return f"http://{current_app.config['MINIO_ENDPOINT']}/{bucket}/{object_name}"
+
+
+def delete_image_from_minio(url: str) -> bool:
+    if not minio_client:
+        return False
+
+    bucket = current_app.config["MINIO_BUCKET"]
+    prefix = f"http://{current_app.config['MINIO_ENDPOINT']}/{bucket}/"
+
+    if not url.startswith(prefix):
+        return False
+
+    object_name = url.replace(prefix, "")
+    minio_client.remove_object(bucket, object_name)
+    return True
+
+
+def update_product_images(product_id: str, main_image_url: str = None, image_urls: List[str] = None):
+    db = get_db()
+    try:
+        oid = ObjectId(product_id)
+    except:
+        return None
+
+    update_data = {}
+    if main_image_url is not None:
+        update_data["main_image_url"] = main_image_url
+    if image_urls is not None:
+        update_data["image_urls"] = image_urls
+
+    update_data["updated_at"] = datetime.utcnow()
+
+    db.products.update_one({"_id": oid, "deleted": False}, {"$set": update_data})
+    return get_product(product_id)
