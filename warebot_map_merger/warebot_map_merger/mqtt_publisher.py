@@ -8,12 +8,16 @@ class MQTTPublisher:
         self.topic = topic
 
         self.client = mqtt.Client(
-            client_id="map_merger_node",
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2
+            client_id="warebot_map_merger",
+            protocol=mqtt.MQTTv5
         )
 
         self.client.connect(host, port, keepalive=60)
         self.client.loop_start()
 
     def publish_map(self, data: dict):
-        self.client.publish(self.topic, json.dumps(data))
+        try:
+            payload = json.dumps(data)
+            self.client.publish(self.topic, payload)
+        except Exception as e:
+            print(f"[MQTT ERROR] {e}")
