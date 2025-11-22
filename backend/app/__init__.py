@@ -11,14 +11,18 @@ from .extensions import init_extensions, get_db
 from .routes import api_bp
 from .auth_routes import auth_bp
 
-# Global SocketIO instance
+
+# =========================================================
+# GLOBAL SOCKET.IO INSTANCE
+# =========================================================
 socketio = SocketIO(cors_allowed_origins="*")
 
 
 # =========================================================
-# ROBOT OFFLINE CHECKER (Writes OFFLINE → Mongo + Influx)
+# ROBOT OFFLINE CHECKER
 # =========================================================
 def start_robot_offline_checker(app):
+    """Background thread: auto-set robot status to OFFLINE if lost."""
     from .services import write_robot_telemetry_influx  # avoid circular import
 
     def checker():
@@ -32,10 +36,10 @@ def start_robot_offline_checker(app):
                 for r in robots:
                     last_seen = r.get("last_seen")
 
-                    # If robot is offline
+                    # Mark offline condition
                     if not last_seen or now - last_seen > timedelta(seconds=10):
 
-                        # Update Mongo snapshot
+                        # Update Mongo
                         db.robots.update_one(
                             {"_id": r["_id"]},
                             {"$set": {
@@ -44,12 +48,12 @@ def start_robot_offline_checker(app):
                             }}
                         )
 
-                        # Write OFFLINE state into InfluxDB (as INT)
+                        # Log offline to Influx
                         write_robot_telemetry_influx(r["robot_id"], {
-                            "cpu_usage": int(r.get("cpu_usage") or 0),
-                            "ram_usage": int(r.get("ram_usage") or 0),
-                            "battery_level": int(r.get("battery_level") or 0),
-                            "temperature": int(r.get("temperature") or 0),
+                            "cpu_usage": float(r.get("cpu_usage") or 0),
+                            "ram_usage": float(r.get("ram_usage") or 0),
+                            "battery_level": float(r.get("battery_level") or 0),
+                            "temperature": float(r.get("temperature") or 0),
                             "x": float(r.get("x") or 0),
                             "y": float(r.get("y") or 0),
                             "status": "OFFLINE"
@@ -65,39 +69,40 @@ def start_robot_offline_checker(app):
                         except:
                             pass
 
-                time.sleep(5)  # run checker every 5 seconds
+                time.sleep(5)
 
     Thread(target=checker, daemon=True).start()
 
+
 # =========================================================
-# FLASK APPLICATION FACTORY
+# APPLICATION FACTORY
 # =========================================================
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
-    # CORS for all routes
+    # Enable CORS globally
     CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-    # init DB + JWT + MinIO + Influx
+    # DB + JWT + MinIO + Influx
     init_extensions(app)
 
-    # init Socket.IO
+    # Initialize Socket.IO
     socketio.init_app(app)
     app.extensions["socketio"] = socketio
 
-    # Swagger docs
+    # Swagger documentation
     Swagger(app)
 
-    # API routes
+    # Register Blueprints
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(api_bp, url_prefix="/api")
 
-    # MQTT Client startup
+    # Start MQTT client
     from .mqtt_client import start_mqtt_client
     app.mqtt = start_mqtt_client(app)
 
-    # Start offline robot tracker
+    # Start background offline robot checker
     start_robot_offline_checker(app)
 
     return app
