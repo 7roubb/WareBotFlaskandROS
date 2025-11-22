@@ -343,46 +343,50 @@ def soft_delete_robot(id: str):
     res = db.robots.update_one({"_id": oid}, {"$set": {"deleted": True}})
     return res.modified_count > 0
 
-
 def update_robot_telemetry(robot_name: str, t: dict):
+    """Save latest snapshot in Mongo AND Influx"""
     db = get_db()
     t["updated_at"] = datetime.utcnow()
-    t["last_seen"] = datetime.utcnow()   # NEW LINE
+    t["last_seen"] = datetime.utcnow()
 
+    # Mongo Snapshot
     db.robots.update_one(
         {"robot_id": robot_name, "deleted": False},
         {"$set": t},
-        upsert=False
+        upsert=True
     )
 
+    # Influx Historical (NEW)
+    write_robot_telemetry_influx(robot_name, t)
+
+
 def write_robot_telemetry_influx(robot_name: str, t: dict):
-    """Historical → InfluxDB"""
-    influx, write_api = get_influx()
+    """Historical Time-Series Storage → InfluxDB"""
+    influx_client, write_api = get_influx()
 
     point = (
         Point("robot_telemetry")
         .tag("robot", robot_name)
-        .field("cpu_usage", t["cpu_usage"])
-        .field("ram_usage", t["ram_usage"])
-        .field("battery_level", t["battery_level"])
-        .field("temperature", t["temperature"])
-        .field("x", t["x"])
-        .field("y", t["y"])
-        .field("status_code", status_to_code(t["status"]))
+        .field("cpu_usage", float(t["cpu_usage"]))
+        .field("ram_usage", float(t["ram_usage"]))
+        .field("battery_level", float(t["battery_level"]))
+        .field("temperature", float(t["temperature"]))
+        .field("x", float(t["x"]))
+        .field("y", float(t["y"]))
+        .field("status_code", int(status_to_code(t["status"])))  # FIXED
         .time(datetime.utcnow())
     )
 
     write_api.write(
         bucket=current_app.config["INFLUX_BUCKET"],
+        org=current_app.config["INFLUX_ORG"],   # FIXED
         record=point
     )
-
-
 def status_to_code(status: str) -> int:
     status = status.upper()
     if status == "IDLE": return 0
     if status == "BUSY": return 1
-    if status == "ERROR": return 2
+    if status == "CHARGING": return 2
     if status == "OFFLINE": return 3
     return -1
 

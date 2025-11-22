@@ -1,0 +1,243 @@
+{
+  "id": null,
+  "uid": "warebot-pro",
+  "title": "WareBot Robotics PRO Dashboard",
+  "tags": ["warebot", "robotics", "mp400"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+
+  "templating": {
+    "list": [
+      {
+        "name": "robot",
+        "type": "query",
+        "datasource": "InfluxDB",
+        "query": "import \"influxdata/influxdb/schema\" schema.tagValues(bucket: \"telemetry\", tag: \"robot\")",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {}
+      }
+    ]
+  },
+
+  "panels": [
+
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Robot Status",
+      "gridPos": { "x": 0, "y": 0, "w": 5, "h": 4 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket:\"telemetry\") |> range(start:-3m) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"status_code\") |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "values": false },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "IDLE", "color": "green" },
+                "1": { "text": "BUSY", "color": "blue" },
+                "2": { "text": "CHARGING", "color": "yellow" },
+                "3": { "text": "OFFLINE", "color": "gray" },
+                "-1": { "text": "UNKNOWN", "color": "red" }
+              }
+            }
+          ]
+        }
+      }
+    },
+
+    {
+      "id": 2,
+      "type": "gauge",
+      "title": "CPU Usage (%)",
+      "gridPos": { "x": 5, "y": 0, "w": 5, "h": 4 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "B",
+          "query": "from(bucket:\"telemetry\") |> range(start:-10m) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"cpu_usage\") |> mean()"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["mean"] },
+        "min": 0, "max": 100,
+        "thresholds": {
+          "steps": [
+            { "value": 0, "color": "green" },
+            { "value": 70, "color": "orange" },
+            { "value": 90, "color": "red" }
+          ]
+        }
+      }
+    },
+
+    
+    {
+      "id": 3,
+      "type": "gauge",
+      "title": "RAM Usage (%)",
+      "gridPos": { "x": 10, "y": 0, "w": 5, "h": 4 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "C",
+          "query": "from(bucket:\"telemetry\") |> range(start:-10m) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"ram_usage\") |> mean()"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["mean"] },
+        "min": 0, "max": 100,
+        "thresholds": {
+          "steps": [
+            { "value": 0, "color": "green" },
+            { "value": 70, "color": "orange" },
+            { "value": 90, "color": "red" }
+          ]
+        }
+      }
+    },
+
+  
+    {
+      "id": 4,
+      "type": "gauge",
+      "title": "Battery Level (%)",
+      "gridPos": { "x": 15, "y": 0, "w": 5, "h": 4 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "D",
+          "query": "from(bucket:\"telemetry\") |> range(start:-10m) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"battery_level\") |> mean()"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["mean"] },
+        "min": 0, "max": 100,
+        "thresholds": {
+          "steps": [
+            { "value": 0, "color": "red" },
+            { "value": 20, "color": "orange" },
+            { "value": 50, "color": "yellow" },
+            { "value": 80, "color": "green" }
+          ]
+        }
+      }
+    },
+
+ 
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Current Position (X,Y)",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "E",
+          "query": "from(bucket:\"telemetry\") |> range(start:-3m) |> filter(fn:(r)=>r.robot==\"${robot}\") |> pivot(rowKey:[\"_time\"],columnKey:[\"_field\"],valueColumn:\"_value\") |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "text": {},
+        "colorMode": "none"
+      }
+    },
+
+  
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Temperature (°C)",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 6 },
+      "datasource": "InfluxDB",
+      "targets": [
+        { "refId": "F", "query": "from(bucket:\"telemetry\") |> range(start:-2h) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"temperature\")" }
+      ]
+    },
+
+
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "CPU Usage Over Time",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 6 },
+      "datasource": "InfluxDB",
+      "targets": [
+        { "refId": "G", "query": "from(bucket:\"telemetry\") |> range(start:-2h) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"cpu_usage\")" }
+      ]
+    },
+{
+
+      "id": 8,
+      "type": "timeseries",
+      "title": "Battery Drain Over Time",
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 6 },
+      "datasource": "InfluxDB",
+      "targets": [
+        { "refId": "H", "query": "from(bucket:\"telemetry\") |> range(start:-8h) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"battery_level\")" }
+      ]
+    },
+
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "XY Live Path",
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 6 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "I",
+          "query": "from(bucket:\"telemetry\") |> range(start:-30m) |> filter(fn:(r)=>r.robot==\"${robot}\") |> pivot(rowKey:[\"_time\"], columnKey:[\"_field\"], valueColumn:\"_value\") |> keep(columns:[\"_time\",\"x\",\"y\"])"
+        }
+      ]
+    },
+
+    
+    {
+      "id": 10,
+      "type": "bargauge",
+      "title": "Averages (Last 10 Minutes)",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 6 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "J",
+          "query": "from(bucket:\"telemetry\") |> range(start:-10m) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field =~ /cpu_usage|ram_usage|battery_level/) |> group(columns:[\"_field\"]) |> mean()"
+        }
+      ]
+    },
+
+   
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Status Timeline",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 6 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "K",
+          "query": "from(bucket:\"telemetry\") |> range(start:-2h) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"status_code\")"
+        }
+      ]
+    }
+
+  ]
+}
