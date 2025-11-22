@@ -1,9 +1,10 @@
+#!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
 
+import numpy as np
 from nav_msgs.msg import OccupancyGrid
 
-import numpy as np
 from .mqtt_publisher import MQTTPublisher
 
 
@@ -12,15 +13,14 @@ class MultiRobotMapMerger(Node):
     def __init__(self):
         super().__init__("multi_robot_map_merger")
 
-        # Modify robot topics here
         self.robot_topics = [
             "/robot1/map",
-            "/robot2/map",
-            "/robot3/map",
+            # "/robot2/map",  # Add more when needed
+            # "/robot3/map",
         ]
 
         self.maps = {}
-        self.map_headers = {}
+        self.map_info = {}
 
         self.mqtt = MQTTPublisher(
             host="localhost",
@@ -28,41 +28,52 @@ class MultiRobotMapMerger(Node):
             topic="warehouse/map"
         )
 
-        for t in self.robot_topics:
+        for topic in self.robot_topics:
             self.create_subscription(
                 OccupancyGrid,
-                t,
-                lambda msg, topic=t: self.map_callback(msg, topic),
+                topic,
+                lambda msg, t=topic: self.map_callback(msg, t),
                 10
             )
 
         self.timer = self.create_timer(0.5, self.publish_merged_map)
-
-        self.get_logger().info("Multi Robot Map Merger Started")
+        self.get_logger().info("🚀 Multi-Robot Map Merger Started")
 
     def map_callback(self, msg, topic):
+        expected_size = msg.info.width * msg.info.height
+
+        if len(msg.data) != expected_size:
+            self.get_logger().error(
+                f"❌ Map size mismatch from {topic}: expected {expected_size}, but got {len(msg.data)}"
+            )
+            return
+
         grid = np.array(msg.data, dtype=np.int8).reshape(
-            msg.info.height, msg.info.width
+            msg.info.height,
+            msg.info.width
         )
+
         self.maps[topic] = grid
-        self.map_headers[topic] = msg.info
+        self.map_info[topic] = msg.info
 
     def publish_merged_map(self):
         if len(self.maps) == 0:
             return
 
-        first = next(iter(self.maps))
-        base = self.maps[first].copy()
-        info = self.map_headers[first]
+        first_topic = next(iter(self.maps))
+        base = self.maps[first_topic].copy()
+        info = self.map_info[first_topic]
 
-        # Simple merge: take max cell value
         for topic, m in self.maps.items():
-            if m.shape == base.shape:
-                base = np.maximum(base, m)
+            if m.shape != base.shape:
+                self.get_logger().warn(f"⚠️ Skipping {topic} — different map size!")
+                continue
+
+            base = np.maximum(base, m)
 
         merged = base.flatten().tolist()
 
-        map_json = {
+        payload = {
             "width": info.width,
             "height": info.height,
             "resolution": info.resolution,
@@ -74,9 +85,8 @@ class MultiRobotMapMerger(Node):
             "data": merged
         }
 
-        self.mqtt.publish_map(map_json)
-        self.get_logger().info("Merged map published to MQTT")
-
+        self.mqtt.publish_map(payload)
+        self.get_logger().info("🗺️ Published merged map to MQTT → warehouse/map")
 
 def main(args=None):
     rclpy.init(args=args)

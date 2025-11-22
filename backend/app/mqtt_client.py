@@ -27,6 +27,7 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     app = userdata["app"]
     app.logger.info(f"[MQTT] Connected with code: {reason_code}")
 
+    # Telemetry + tasks + merged map
     client.subscribe("robots/mp400/+/status")
     client.subscribe("robots/mp400/+/task_status")
     client.subscribe("warehouse/map")
@@ -68,27 +69,28 @@ def on_message(client, userdata, msg):
                 # Snapshot in MongoDB
                 update_robot_telemetry(robot_name, telemetry)
 
-                # Time-series in InfluxDB
-                try:
-                    point = (
-                        Point("robot_telemetry")
-                        .tag("robot", robot_name)
-                        .field("cpu_usage", float(telemetry["cpu_usage"]))
-                        .field("ram_usage", float(telemetry["ram_usage"]))
-                        .field("battery_level", float(telemetry["battery_level"]))
-                        .field("temperature", float(telemetry["temperature"]))
-                        .field("x", float(telemetry["x"]))
-                        .field("y", float(telemetry["y"]))
-                        .field("status_code", status_to_code(telemetry["status"]))
-                    )
+                # Time-series in InfluxDB (if configured)
+                if influx_client is not None and write_api is not None:
+                    try:
+                        point = (
+                            Point("robot_telemetry")
+                            .tag("robot", robot_name)
+                            .field("cpu_usage", float(telemetry["cpu_usage"]))
+                            .field("ram_usage", float(telemetry["ram_usage"]))
+                            .field("battery_level", float(telemetry["battery_level"]))
+                            .field("temperature", float(telemetry["temperature"]))
+                            .field("x", float(telemetry["x"]))
+                            .field("y", float(telemetry["y"]))
+                            .field("status_code", status_to_code(telemetry["status"]))
+                        )
 
-                    write_api.write(
-                        bucket=current_app.config["INFLUX_BUCKET"],
-                        org=current_app.config["INFLUX_ORG"],
-                        record=point
-                    )
-                except Exception as e:
-                    app.logger.error(f"[InfluxDB Write Error] {e}")
+                        write_api.write(
+                            bucket=current_app.config["INFLUX_BUCKET"],
+                            org=current_app.config["INFLUX_ORG"],
+                            record=point
+                        )
+                    except Exception as e:
+                        app.logger.error(f"[InfluxDB Write Error] {e}")
 
                 # WebSocket to frontend
                 ws_emit("telemetry", {
@@ -111,21 +113,21 @@ def on_message(client, userdata, msg):
                 if task_id and status:
                     update_task_status(task_id, status)
 
-                    # Optionally store in Influx
-                    try:
-                        point = (
-                            Point("robot_task")
-                            .tag("robot", topic.split("/")[2])
-                            .field("task_id", str(task_id))
-                            .field("status", str(status))
-                        )
-                        write_api.write(
-                            bucket=current_app.config["INFLUX_BUCKET"],
-                            org=current_app.config["INFLUX_ORG"],
-                            record=point
-                        )
-                    except Exception as e:
-                        app.logger.error(f"[InfluxDB Task Write Error] {e}")
+                    if influx_client is not None and write_api is not None:
+                        try:
+                            point = (
+                                Point("robot_task")
+                                .tag("robot", topic.split("/")[2])
+                                .field("task_id", str(task_id))
+                                .field("status", str(status))
+                            )
+                            write_api.write(
+                                bucket=current_app.config["INFLUX_BUCKET"],
+                                org=current_app.config["INFLUX_ORG"],
+                                record=point
+                            )
+                        except Exception as e:
+                            app.logger.error(f"[InfluxDB Task Write Error] {e}")
 
                     ws_emit("task_status", data)
 
@@ -139,12 +141,14 @@ def on_message(client, userdata, msg):
             try:
                 data = json.loads(payload)
 
+                # Save latest merged map
                 db.maps.update_one(
                     {"name": "merged_map"},
                     {"$set": data},
                     upsert=True
                 )
 
+                # Notify frontend
                 ws_emit("map_update", data)
 
             except Exception as e:
@@ -175,10 +179,11 @@ def start_mqtt_client(app):
         return mqtt_client
 
     mqtt_client = mqtt.Client(
-        client_id="warebot_backend",
-        userdata={"app": app},
-        protocol=mqtt.MQTTv5
+    client_id="warebot_backend",
+    userdata={"app": app},
+    protocol=mqtt.MQTTv5
     )
+
 
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
