@@ -53,26 +53,36 @@ class ProductUpdate(BaseModel):
 # SHELF MODELS
 # =========================================================
 class ShelfCreate(BaseModel):
-    warehouse_id: str
+    warehouse_id: str = Field(..., min_length=1, max_length=100)
     x_coord: int
     y_coord: int
     level: int
+
     available: bool = True
     status: str = "IDLE"
 
-    @validator("warehouse_id", "status")
+    # NEW — to store the link of the generated AprilTag (backend will populate it)
+    april_tag_url: Optional[str] = None
+
+    @validator("warehouse_id", "status", pre=True)
     def strip_strings(cls, v):
-        return v.strip()
+        return v.strip() if isinstance(v, str) else v
 
 
 class ShelfUpdate(BaseModel):
-    warehouse_id: Optional[str] = None
+    warehouse_id: Optional[str] = Field(default=None, min_length=1, max_length=100)
     x_coord: Optional[int] = None
     y_coord: Optional[int] = None
     level: Optional[int] = None
     available: Optional[bool] = None
     status: Optional[str] = None
 
+    # NEW — allow updating tag URL if needed (rare, but supported)
+    april_tag_url: Optional[str] = None
+
+    @validator("warehouse_id", "status", "april_tag_url", pre=True)
+    def strip_strings(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
 # =========================================================
 # ROBOT MODELS

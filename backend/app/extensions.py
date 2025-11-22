@@ -2,7 +2,8 @@ from flask import current_app
 from pymongo import MongoClient
 from flask_jwt_extended import JWTManager
 from minio import Minio
-from influxdb_client import InfluxDBClient, WriteOptions
+from influxdb_client import InfluxDBClient
+from influxdb_client.client.write_api import SYNCHRONOUS
 
 mongo_client = None
 mongo_db = None
@@ -16,14 +17,20 @@ def init_extensions(app):
     global mongo_client, mongo_db
     global minio_client, influx_client, influx_write_api
 
+    # ============================
     # MongoDB
+    # ============================
     mongo_client = MongoClient(app.config["MONGO_URI"])
     mongo_db = mongo_client[app.config["MONGO_DB_NAME"]]
 
+    # ============================
     # JWT
+    # ============================
     jwt.init_app(app)
 
+    # ============================
     # MinIO
+    # ============================
     print(">>> Initializing MinIO...")
 
     minio_client = Minio(
@@ -40,18 +47,22 @@ def init_extensions(app):
 
     print(f">>> MinIO initialized: bucket={bucket}")
 
+    # ============================
     # InfluxDB
+    # ============================
     print(">>> Initializing InfluxDB...")
 
-    influx_client = InfluxDBClient(
+    influx_client_local = InfluxDBClient(
         url=app.config["INFLUX_URL"],
         token=app.config["INFLUX_TOKEN"],
         org=app.config["INFLUX_ORG"],
     )
 
-    influx_write_api = influx_client.write_api(
-        write_options=WriteOptions(batch_size=1, flush_interval=0)
-    )
+    # مهم: نستخدم SYNCHRONOUS عشان نتجنب مشاكل الـ threads والـ generator
+    influx_write_api_local = influx_client_local.write_api(write_options=SYNCHRONOUS)
+
+    influx_client = influx_client_local
+    influx_write_api = influx_write_api_local
 
     print(">>> InfluxDB initialized.")
 

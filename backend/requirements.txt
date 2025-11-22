@@ -13,3 +13,5 @@ influxdb-client==1.48.0
 flask-socketio==5.3.6
 python-socketio==5.11.3
 eventlet==0.36.1
+opencv-python-headless==4.10.0.84
+moms_apriltag==2023.1.15

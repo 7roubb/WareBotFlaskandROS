@@ -67,16 +67,19 @@ services:
         echo '🔗 Setting MinIO alias...';
         mc alias set local http://minio:9000 admin admin123;
 
-        echo '🪣 Creating bucket if not exists...';
+        echo '🪣 Creating buckets if not exist...';
         mc mb -p local/products || true;
+        mc mb -p local/shelves || true;
 
-        echo '🌍 Making bucket public (anonymous READ)...';
+        echo '🌍 Making buckets public (anonymous READ)...';
         mc anonymous set download local/products;
+        mc anonymous set download local/shelves;
 
-        echo '✅ MinIO bucket \"products\" is public and ready!';
+        echo '✅ Buckets \"products\" and \"shelves\" are public and ready!';
       "
     networks:
       - warebot-net
+
 
   influxdb:
     image: influxdb:2.7
