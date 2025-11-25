@@ -5,89 +5,113 @@ from rclpy.node import Node
 import numpy as np
 from nav_msgs.msg import OccupancyGrid
 
+from rclpy.qos import (
+    QoSProfile,
+    QoSReliabilityPolicy,
+    QoSDurabilityPolicy,
+    QoSHistoryPolicy,
+)
+
 from .mqtt_publisher import MQTTPublisher
 
 
-class MultiRobotMapMerger(Node):
+class MapMerger(Node):
+    """
+    Single-robot map forwarder / merger.
+
+    For your current setup:
+      - Subscribes to /map (Nav2 static map)
+      - Publishes /global_map
+      - Sends same map to MQTT as JSON
+    """
 
     def __init__(self):
-        super().__init__("multi_robot_map_merger")
+        super().__init__("map_merger")
 
-        # ======================
-        # Parameters
-        # ======================
-        # robots: comma-separated list, e.g. "robot1,robot2"
-        self.declare_parameter("robots", "robot1")
-        robots_param = self.get_parameter("robots").value
-        self.robot_list = [r.strip() for r in robots_param.split(",") if r.strip()]
+        # ======================================================
+        # QoS profiles
+        # ======================================================
+        # Match Nav2 map_server's latched /map:
+        #   - reliable
+        #   - transient local (latched)
+        self.map_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
-        if not self.robot_list:
-            self.robot_list = ["robot1"]
+        # Make /global_map also latched so RViz and others
+        # get the latest map as soon as they subscribe
+        self.global_map_qos = QoSProfile(
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
 
-        self.get_logger().info(f"🤖 Robots list: {self.robot_list}")
+        # ======================================================
+        # Internal storage
+        # ======================================================
+        self.map_grid = None
+        self.map_info = None
 
-        # ======================
-        # Prepare topics
-        # ======================
-        self.robot_topics = [f"/{r}/map" for r in self.robot_list]
-
-        # Store latest map per robot
-        self.maps = {}
-        self.map_info = {}
-
-        # ======================
+        # ======================================================
         # MQTT Publisher (to backend/dashboard)
-        # ======================
+        # ======================================================
         self.mqtt = MQTTPublisher(
             host="localhost",
             port=1883,
-            topic="warehouse/map"  # backend listens on this
+            topic="warehouse/map",  # backend listens on this
         )
 
-        # ======================
+        # ======================================================
         # ROS2 Publisher for Global Map (shared to all robots)
-        # ======================
+        # ======================================================
         self.global_map_pub = self.create_publisher(
             OccupancyGrid,
             "/global_map",
-            10
+            self.global_map_qos,
         )
 
-        # ======================
-        # Subscriptions
-        # ======================
-        for topic in self.robot_topics:
-            self.create_subscription(
-                OccupancyGrid,
-                topic,
-                lambda msg, t=topic: self.map_callback(msg, t),
-                10
-            )
-            self.get_logger().info(f"📡 Subscribed to local map: {topic}")
+        # ======================================================
+        # Subscription to /map
+        # ======================================================
+        self.create_subscription(
+            OccupancyGrid,
+            "/map",
+            self.map_callback,
+            self.map_qos,
+        )
+        self.get_logger().info("📡 Subscribed to /map")
+        self.get_logger().info("🚀 Single-Robot Map Merger Started")
 
-        # Timer for merging + publishing
+        # Timer for publishing merged map
         self.timer = self.create_timer(0.5, self.publish_merged_map)
-        self.get_logger().info("🚀 Multi-Robot Map Merger Started")
 
     # ============================================================
-    # CALLBACK: STORE MAP FOR EACH ROBOT
+    # CALLBACK: STORE MAP
     # ============================================================
-    def map_callback(self, msg: OccupancyGrid, topic: str):
+    def map_callback(self, msg: OccupancyGrid):
         try:
             expected = msg.info.width * msg.info.height
             if len(msg.data) != expected:
                 self.get_logger().warn(
-                    f"❌ Wrong map size from {topic}: expected {expected}, got {len(msg.data)}"
+                    f"❌ Wrong map size from /map: expected {expected}, got {len(msg.data)}"
                 )
                 return
 
             grid = np.array(msg.data, dtype=np.int8).reshape(
                 msg.info.height,
-                msg.info.width
+                msg.info.width,
             )
 
-            self.maps[topic] = grid
-            self.map_info[topic] = msg.info
+            self.map_grid = grid
+            self.map_info = msg.info
+
+            self.get_logger().info(
+                f"✅ Received map from /map, size={grid.shape}"
+            )
 
         except Exception as e:
             self.get_logger().error(f"[MAP CALLBACK ERROR] {e}")
@@ -96,23 +120,13 @@ class MultiRobotMapMerger(Node):
     # MERGE & PUBLISH (MQTT + ROS2 Topic)
     # ============================================================
     def publish_merged_map(self):
-        if len(self.maps) == 0:
+        # For single robot, "merge" is just forwarding the map
+        if self.map_grid is None or self.map_info is None:
             return
 
         try:
-            # Use first map as base
-            first_topic = next(iter(self.maps))
-            base = self.maps[first_topic].copy()
-            info = self.map_info[first_topic]
-
-            # Merge via max (occupancy OR)
-            for topic, m in self.maps.items():
-                if m.shape != base.shape:
-                    self.get_logger().warn(
-                        f"⚠️ Skipping {topic}: size mismatch {m.shape} vs {base.shape}"
-                    )
-                    continue
-                base = np.maximum(base, m)
+            base = self.map_grid.copy()
+            info = self.map_info
 
             merged = base.flatten().tolist()
 
@@ -126,9 +140,9 @@ class MultiRobotMapMerger(Node):
                 "origin": {
                     "x": float(info.origin.position.x),
                     "y": float(info.origin.position.y),
-                    "yaw": 0.0
+                    "yaw": 0.0,
                 },
-                "data": merged
+                "data": merged,
             }
 
             self.mqtt.publish_map(payload)
@@ -145,12 +159,13 @@ class MultiRobotMapMerger(Node):
             msg.info.resolution = info.resolution
             msg.info.origin = info.origin  # reuse original origin
 
-            # Ensure int list
             msg.data = [int(v) for v in merged]
 
             self.global_map_pub.publish(msg)
 
-            self.get_logger().info("🗺️ Published merged map → MQTT (warehouse/map) + ROS2 (/global_map)")
+            self.get_logger().info(
+                "🗺️ Published map → MQTT (warehouse/map) + ROS2 (/global_map)"
+            )
 
         except Exception as e:
             self.get_logger().error(f"[MERGE ERROR] {e}")
@@ -158,7 +173,7 @@ class MultiRobotMapMerger(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MultiRobotMapMerger()
+    node = MapMerger()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
