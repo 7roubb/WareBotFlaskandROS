@@ -11,12 +11,6 @@ def ws_emit(event: str, data: dict):
     """Emit WebSocket event if socketio is available."""
     try:
         socketio = current_app.extensions["socketio"]
-        # Log the outgoing websocket event for easier debugging
-        try:
-            current_app.logger.debug(f"[WS EMIT] event={event} payload={data}")
-        except Exception:
-            # ignore logging errors
-            pass
         socketio.emit(event, data)
     except Exception as e:
         current_app.logger.error(f"[WS EMIT ERROR] {e}")
@@ -75,12 +69,6 @@ def on_message(client, userdata, msg):
                 # Snapshot in MongoDB
                 update_robot_telemetry(robot_name, telemetry)
 
-                # Attempt to read the robot document to include canonical IDs in the emit
-                try:
-                    robot_doc = db.robots.find_one({"robot_id": robot_name, "deleted": False})
-                except Exception:
-                    robot_doc = None
-
                 # Time-series in InfluxDB (if configured)
                 if influx_client is not None and write_api is not None:
                     try:
@@ -104,22 +92,11 @@ def on_message(client, userdata, msg):
                     except Exception as e:
                         app.logger.error(f"[InfluxDB Write Error] {e}")
 
-                # WebSocket to frontend: include multiple id/name fields so frontend can match robustly
-                emit_payload = {
+                # WebSocket to frontend
+                ws_emit("telemetry", {
                     "robot": robot_name,
-                    "name": robot_doc.get("name") if robot_doc else robot_name,
-                    "robot_id": robot_doc.get("robot_id") if robot_doc and robot_doc.get("robot_id") else robot_name,
-                    "id": str(robot_doc.get("_id")) if robot_doc and robot_doc.get("_id") else None,
-                    **telemetry,
-                }
-
-                # extra debug log to help trace why frontend may not be updating
-                try:
-                    app.logger.debug(f"[MQTT -> WS] telemetry emit: {emit_payload}")
-                except Exception:
-                    pass
-
-                ws_emit("telemetry", emit_payload)
+                    **telemetry
+                })
 
             except Exception as e:
                 app.logger.error(f"[MQTT Telemetry Error] {e}")
