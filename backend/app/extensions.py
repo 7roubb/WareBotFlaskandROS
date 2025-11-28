@@ -5,6 +5,9 @@ from minio import Minio
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.write_api import SYNCHRONOUS
 from flask_socketio import SocketIO
+from bson import ObjectId
+from datetime import datetime
+from flask.json.provider import DefaultJSONProvider
 
 mongo_client = None
 mongo_db = None
@@ -15,9 +18,23 @@ influx_write_api = None
 socketio = SocketIO()
 
 
+class CustomJSONProvider(DefaultJSONProvider):
+    """Custom JSON provider for MongoDB ObjectId and datetime"""
+    def default(self, o):
+        if isinstance(o, ObjectId):
+            return str(o)
+        if isinstance(o, datetime):
+            return o.isoformat()
+        return super().default(o)
+
+
 def init_extensions(app):
     global mongo_client, mongo_db
     global minio_client, influx_client, influx_write_api, socketio
+
+    # Set custom JSON provider for Flask 3.0+
+    app.json_provider_class = CustomJSONProvider
+    app.json = CustomJSONProvider(app)
 
     # ============================
     # MongoDB
@@ -60,7 +77,6 @@ def init_extensions(app):
         org=app.config["INFLUX_ORG"],
     )
 
-    # مهم: نستخدم SYNCHRONOUS عشان نتجنب مشاكل الـ threads والـ generator
     influx_write_api_local = influx_client_local.write_api(write_options=SYNCHRONOUS)
 
     influx_client = influx_client_local
@@ -68,10 +84,8 @@ def init_extensions(app):
 
     print(">>> InfluxDB initialized.")
 
-    # Initialize Socket.IO and expose it via app.extensions for mqtt_client.ws_emit
     try:
         socketio.init_app(app, cors_allowed_origins="*")
-        # make sure it's discoverable by current_app.extensions["socketio"]
         try:
             app.extensions["socketio"] = socketio
         except Exception:

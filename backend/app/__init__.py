@@ -100,7 +100,12 @@ def create_app():
 
     # Start MQTT client
     from .mqtt_client import start_mqtt_client
+    from .services import get_ros2_service
     app.mqtt = start_mqtt_client(app)
+    
+    # Initialize ROS2 integration service with MQTT client
+    ros2_service = get_ros2_service()
+    ros2_service.set_mqtt_client(app.mqtt)
 
     # Start background offline robot checker
     start_robot_offline_checker(app)

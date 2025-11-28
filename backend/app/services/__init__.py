@@ -20,11 +20,12 @@ from .shelf_service import (
 from .robot_service import (
     create_robot, list_robots, get_robot,
     update_robot, soft_delete_robot,
-    update_robot_telemetry, write_robot_telemetry_influx
+    update_robot_telemetry, write_robot_telemetry_influx,
+    get_robot_service
 )
 
 from .task_service import (
-    create_task_and_assign, list_tasks
+    create_task_and_assign, list_tasks, update_task_status
 )
 
 from .dashboard_service import (
@@ -48,8 +49,8 @@ from .admin_service import (
     get_admin_by_username,
     verify_admin_password
 )
-from .task_service import (
-    create_task_and_assign,
-    list_tasks,
-    update_task_status,   # ← Missing, ADD THIS!
+
+from .ros2_integration import (
+    get_ros2_service
 )
+
