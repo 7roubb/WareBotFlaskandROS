@@ -57,8 +57,8 @@ class RobotService(BaseService):
         return self.get_robot(robot_id)
     
     def get_robot(self, robot_id: str) -> Dict[str, Any]:
-        """Get robot by id"""
-        robot = self.repo.find_by_id(robot_id)
+        """Get robot by robot_id"""
+        robot = self.repo.find_by_robot_id(robot_id)
         if not robot:
             raise NotFoundError("Robot", robot_id)
         return self.serialize_id(robot)
