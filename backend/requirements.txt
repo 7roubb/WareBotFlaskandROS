@@ -1,0 +1,17 @@
+Flask==3.0.3
+pymongo==4.9.1
+pydantic==2.9.2
+paho-mqtt==2.1.0
+flasgger==0.9.7.1
+flask-jwt-extended==4.7.1
+minio==7.2.5
+Flask-Cors==4.0.0
+python-dotenv==1.0.1
+Werkzeug==3.0.3
+flask-jwt-extended==4.7.1
+flask-socketio==5.3.6
+python-socketio==5.11.3
+eventlet==0.36.1
+influxdb-client==1.48.0
+opencv-python-headless==4.10.0.84
+moms_apriltag==2023.1.15

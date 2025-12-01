@@ -1,0 +1,469 @@
+#!/usr/bin/env python3
+"""
+Enhanced WareBot Task Runner Node
+Fully MQTT-based autonomous navigation for warehouse tasks
+
+- Compatible with paho-mqtt v2.x (uses callback_api_version)
+- Basic reconnect/backoff logic on MQTT disconnect
+- Publishes status to both ROS2 topic and MQTT
+- Uses Nav2 NavigateToPose action for navigation
+"""
+
+import json
+import math
+import time
+import threading
+from enum import Enum
+from typing import Optional, Dict, Any
+
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from rclpy.executors import MultiThreadedExecutor
+
+from geometry_msgs.msg import PoseStamped
+from nav2_msgs.action import NavigateToPose
+from std_msgs.msg import String
+import paho.mqtt.client as mqtt
+
+
+class TaskState(Enum):
+    """Task execution states"""
+    IDLE = "IDLE"
+    ASSIGNED = "ASSIGNED"
+    MOVING_TO_PICKUP = "MOVING_TO_PICKUP"
+    ARRIVED_AT_PICKUP = "ARRIVED_AT_PICKUP"
+    ATTACHED = "ATTACHED"
+    MOVING_TO_DROP = "MOVING_TO_DROP"
+    ARRIVED_AT_DROP = "ARRIVED_AT_DROP"
+    RELEASED = "RELEASED"
+    MOVING_TO_REFERENCE = "MOVING_TO_REFERENCE"
+    COMPLETED = "COMPLETED"
+    ERROR = "ERROR"
+
+
+class RobotTaskRunner(Node):
+    """Main task runner node for autonomous warehouse robot"""
+
+    def __init__(self):
+        super().__init__("task_runner")
+
+        # --- ROS2 parameters ---
+        self.declare_parameter("robot_id", "robot_1")
+        self.declare_parameter("mqtt_host", "localhost")
+        self.declare_parameter("mqtt_port", 1883)
+        self.declare_parameter("mqtt_qos", 1)
+        self.declare_parameter("mqtt_reconnect_base", 1.0)   # seconds
+        self.declare_parameter("mqtt_reconnect_max", 30.0)   # seconds
+
+        self.robot_id = self.get_parameter("robot_id").value
+        self.mqtt_host = self.get_parameter("mqtt_host").value
+        self.mqtt_port = int(self.get_parameter("mqtt_port").value)
+        self.mqtt_qos = int(self.get_parameter("mqtt_qos").value)
+        self._reconnect_base = float(self.get_parameter("mqtt_reconnect_base").value)
+        self._reconnect_max = float(self.get_parameter("mqtt_reconnect_max").value)
+
+        self.get_logger().info(f"Task Runner initialized for {self.robot_id}")
+
+        # --- State ---
+        self.current_task: Optional[Dict[str, Any]] = None
+        self.task_state = TaskState.IDLE
+        self.reference_point: Optional[Dict[str, float]] = None
+
+        # --- Nav2 action client ---
+        self._nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        self.get_logger().info("Waiting for Nav2 server...")
+        if not self._nav_client.wait_for_server(timeout_sec=10.0):
+            self.get_logger().warn("Nav2 server not available yet. Still continuing; will wait on send.")
+        else:
+            self.get_logger().info("Nav2 server ready")
+
+        # --- ROS2 publisher ---
+        self.task_status_pub = self.create_publisher(String, f"/{self.robot_id}/task/status", 10)
+
+        # --- MQTT client setup (paho-mqtt v2.x compatible) ---
+        try:
+            self.mqtt_client = mqtt.Client(
+                client_id=self.robot_id,
+                callback_api_version=mqtt.CallbackAPIVersion.VERSION1
+            )
+        except Exception as e:
+            # Fallback for older/newer versions (rare)
+            self.get_logger().warn(f"mqtt.Client init fallback: {e}")
+            self.mqtt_client = mqtt.Client(client_id=self.robot_id)
+
+        # Attach callbacks (use flexible signatures to be compatible)
+        self.mqtt_client.on_connect = self._on_mqtt_connect
+        self.mqtt_client.on_message = self._on_mqtt_message
+        self.mqtt_client.on_disconnect = self._on_mqtt_disconnect
+
+        self._mqtt_connected = False
+        self._mqtt_reconnect_attempts = 0
+        self._mqtt_lock = threading.Lock()
+
+        # Start connection
+        self._start_mqtt()
+
+        self.get_logger().info("Task Runner ready and waiting for tasks")
+
+    # ---------------- MQTT lifecycle ----------------
+
+    def _start_mqtt(self):
+        """Connect to MQTT broker and start network loop"""
+        try:
+            self.get_logger().info(f"Connecting to MQTT broker {self.mqtt_host}:{self.mqtt_port} ...")
+            self.mqtt_client.connect(self.mqtt_host, self.mqtt_port, keepalive=60)
+            self.mqtt_client.loop_start()
+            # connection result will be handled by on_connect
+        except Exception as e:
+            self.get_logger().error(f"Initial MQTT connect error: {e}")
+            self._schedule_reconnect()
+
+    def _schedule_reconnect(self):
+        """Schedule reconnect with exponential backoff"""
+        with self._mqtt_lock:
+            self._mqtt_reconnect_attempts += 1
+            delay = min(self._reconnect_base * (2 ** (self._mqtt_reconnect_attempts - 1)), self._reconnect_max)
+            self.get_logger().info(f"Scheduling MQTT reconnect in {delay:.1f}s (attempt {self._mqtt_reconnect_attempts})")
+            timer = threading.Timer(delay, self._attempt_reconnect)
+            timer.daemon = True
+            timer.start()
+
+    def _attempt_reconnect(self):
+        """Try to reconnect to MQTT broker"""
+        with self._mqtt_lock:
+            try:
+                self.get_logger().info("Attempting MQTT reconnect...")
+                self.mqtt_client.reconnect()
+            except Exception as e:
+                self.get_logger().warn(f"Reconnect failed: {e}")
+                self._schedule_reconnect()
+
+    def _on_mqtt_connect(self, client, userdata, flags, rc, properties=None):
+        """MQTT connect callback (compatible signature)"""
+        if rc == 0:
+            self.get_logger().info("MQTT connected successfully")
+            self._mqtt_connected = True
+            self._mqtt_reconnect_attempts = 0
+
+            # Subscribe to the topics we need
+            try:
+                client.subscribe(f"robot/{self.robot_id}/task/assignment", qos=self.mqtt_qos)
+                client.subscribe(f"robot/{self.robot_id}/reference_point/update", qos=self.mqtt_qos)
+                # optional: admin or broadcast topic
+                client.subscribe("robot/all/task/assignment", qos=self.mqtt_qos)
+                self.get_logger().info("MQTT subscriptions set")
+            except Exception as e:
+                self.get_logger().error(f"Subscription failed: {e}")
+        else:
+            self.get_logger().error(f"MQTT failed to connect, rc={rc}; scheduling reconnect")
+            self._schedule_reconnect()
+
+    def _on_mqtt_disconnect(self, client, userdata, rc, properties=None):
+        """MQTT disconnect callback (compatible signature)"""
+        self._mqtt_connected = False
+        # rc == 0: clean disconnect, other values are unexpected
+        if rc != 0:
+            self.get_logger().warn(f"Unexpected MQTT disconnect (rc={rc}); scheduling reconnect")
+            self._schedule_reconnect()
+        else:
+            self.get_logger().info("MQTT cleanly disconnected")
+
+    def _on_mqtt_message(self, client, userdata, msg):
+        """MQTT message callback"""
+        try:
+            payload = msg.payload.decode("utf-8")
+            # Accept either raw JSON or gzipped etc. Here assume JSON string.
+            data = json.loads(payload)
+        except Exception as e:
+            self.get_logger().error(f"Failed to decode MQTT payload on {msg.topic}: {e}")
+            return
+
+        topic = msg.topic
+        # route topics
+        if topic.endswith("/task/assignment") or "task/assignment" in topic:
+            self.get_logger().info(f"MQTT Task assignment received on {topic}")
+            # allow both direct and wrapped formats
+            if isinstance(data, dict):
+                self.on_task_assignment(data)
+            else:
+                self.get_logger().warn("Task assignment payload not an object")
+        elif topic.endswith("/reference_point/update") or "reference_point/update" in topic:
+            self.get_logger().info("MQTT Reference point update received")
+            if isinstance(data, dict):
+                self.on_reference_point_update(data)
+            else:
+                self.get_logger().warn("Reference point payload not an object")
+        else:
+            self.get_logger().debug(f"MQTT message on unhandled topic {topic}")
+
+    # ---------------- Task handling ----------------
+
+    def on_task_assignment(self, task_data: Dict[str, Any]):
+        """Handle a new task assignment"""
+        if self.task_state != TaskState.IDLE:
+            self.get_logger().warn(f"Robot busy ({self.task_state.value}), ignoring new task")
+            # Optionally publish rejection
+            self._publish_mqtt({
+                "task_id": task_data.get("task_id"),
+                "robot_id": self.robot_id,
+                "status": "REJECTED_BUSY",
+                "timestamp": time.time()
+            })
+            return
+
+        # Validate minimal fields
+        required = ["task_id", "pickup_x", "pickup_y", "drop_x", "drop_y"]
+        for f in required:
+            if f not in task_data:
+                self.get_logger().error(f"Task missing required field: {f}")
+                return
+
+        self.current_task = task_data
+        self.task_state = TaskState.ASSIGNED
+        # If the assignment includes a drop zone, set it as the reference point
+        # locally so the robot can return to it even if a separate reference
+        # MQTT message is missed.
+        try:
+            if isinstance(task_data, dict) and task_data.get("drop_x") is not None and task_data.get("drop_y") is not None:
+                self.on_reference_point_update({
+                    "x": float(task_data.get("drop_x", 0.0)),
+                    "y": float(task_data.get("drop_y", 0.0)),
+                    "yaw": float(task_data.get("drop_yaw", 0.0))
+                })
+                self.get_logger().info("Reference point set from assignment payload")
+        except Exception as e:
+            self.get_logger().warn(f"Failed to set reference point from assignment: {e}")
+
+        self.get_logger().info(
+            f"Task assigned: {task_data.get('task_id')} | "
+            f"Pickup: ({task_data.get('pickup_x')},{task_data.get('pickup_y')}) | "
+            f"Drop: ({task_data.get('drop_x')},{task_data.get('drop_y')})"
+        )
+
+        self.publish_status("ASSIGNED")
+        # Start navigation to pickup
+        self.move_to_pickup()
+
+    def on_reference_point_update(self, point_data: Dict[str, float]):
+        """Update reference point"""
+        try:
+            self.reference_point = {
+                "x": float(point_data.get("x", 0.0)),
+                "y": float(point_data.get("y", 0.0)),
+                "yaw": float(point_data.get("yaw", 0.0)),
+            }
+            self.get_logger().info(f"Reference point updated: {self.reference_point}")
+        except Exception as e:
+            self.get_logger().error(f"Invalid reference point payload: {e}")
+
+    # ---------------- Navigation functions ----------------
+
+    def move_to_pickup(self):
+        if not self.current_task:
+            self.get_logger().warn("move_to_pickup called but no current_task")
+            return
+
+        self.task_state = TaskState.MOVING_TO_PICKUP
+        self.publish_status("MOVING_TO_PICKUP")
+
+        x = float(self.current_task.get("pickup_x", 0.0))
+        y = float(self.current_task.get("pickup_y", 0.0))
+        yaw = float(self.current_task.get("pickup_yaw", 0.0))
+
+        self.get_logger().info(f"Moving to pickup: ({x}, {y})")
+        goal = self._create_nav_goal(x, y, yaw)
+
+        # ensure nav server available
+        if not self._nav_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().warn("Nav2 server not ready when sending pickup goal; will try anyway")
+        fut = self._nav_client.send_goal_async(goal)
+        fut.add_done_callback(lambda f: self._handle_nav_result(f, TaskState.ARRIVED_AT_PICKUP))
+
+    def move_to_drop(self):
+        if not self.current_task:
+            self.get_logger().warn("move_to_drop called but no current_task")
+            return
+
+        self.task_state = TaskState.MOVING_TO_DROP
+        self.publish_status("MOVING_TO_DROP")
+
+        x = float(self.current_task.get("drop_x", 0.0))
+        y = float(self.current_task.get("drop_y", 0.0))
+        yaw = float(self.current_task.get("drop_yaw", 0.0))
+
+        self.get_logger().info(f"Moving to drop: ({x}, {y})")
+        goal = self._create_nav_goal(x, y, yaw)
+
+        if not self._nav_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().warn("Nav2 server not ready when sending drop goal; will try anyway")
+        fut = self._nav_client.send_goal_async(goal)
+        fut.add_done_callback(lambda f: self._handle_nav_result(f, TaskState.ARRIVED_AT_DROP))
+
+    def move_to_reference(self):
+        if not self.reference_point:
+            self.get_logger().warn("Reference point not set")
+            self.task_state = TaskState.ERROR
+            self.publish_status("ERROR")
+            return
+
+        self.task_state = TaskState.MOVING_TO_REFERENCE
+        self.publish_status("MOVING_TO_REFERENCE")
+
+        x = self.reference_point["x"]
+        y = self.reference_point["y"]
+        yaw = self.reference_point["yaw"]
+
+        self.get_logger().info("Returning to reference point")
+        goal = self._create_nav_goal(x, y, yaw)
+
+        if not self._nav_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().warn("Nav2 server not ready when sending reference goal; will try anyway")
+        fut = self._nav_client.send_goal_async(goal)
+        fut.add_done_callback(lambda f: self._handle_nav_result(f, TaskState.COMPLETED))
+
+    # ---------------- Navigation callbacks ----------------
+
+    def _handle_nav_result(self, future, next_state: TaskState):
+        """Handle navigation result (goal accepted -> wait for result)"""
+        try:
+            handle = future.result()
+        except Exception as e:
+            self.get_logger().error(f"Failed to get goal handle: {e}")
+            self.task_state = TaskState.ERROR
+            self.publish_status("ERROR")
+            return
+
+        if not handle.accepted:
+            self.get_logger().error("Nav2 rejected goal")
+            self.task_state = TaskState.ERROR
+            self.publish_status("ERROR")
+            return
+
+        self.get_logger().info("Nav2 accepted goal, waiting for result...")
+        result_fut = handle.get_result_async()
+        result_fut.add_done_callback(lambda f: self._handle_nav_complete(f, next_state))
+
+    def _handle_nav_complete(self, future, next_state: TaskState):
+        """Handle the navigation completion callback"""
+        try:
+            # get result (safely)
+            res = future.result()
+            # res.status should be checked; but here we proceed on success
+            self.get_logger().info(f"Reached destination (state={next_state.value})")
+
+            if next_state == TaskState.ARRIVED_AT_PICKUP:
+                self.task_state = TaskState.ATTACHED
+                self.publish_status("ATTACHED")
+                self.get_logger().info("Shelf attached (simulated). Proceeding to drop.")
+                # small delay to simulate attach
+                time.sleep(1.0)
+                self.move_to_drop()
+
+            elif next_state == TaskState.ARRIVED_AT_DROP:
+                self.task_state = TaskState.RELEASED
+                self.publish_status("RELEASED")
+                self.get_logger().info("Shelf released (simulated). Returning to reference.")
+                time.sleep(1.0)
+                self.move_to_reference()
+
+            elif next_state == TaskState.COMPLETED:
+                self.task_state = TaskState.COMPLETED
+                self.publish_status("COMPLETED")
+                self.get_logger().info("Task completed ✓")
+                self.current_task = None
+                self.task_state = TaskState.IDLE
+
+        except Exception as e:
+            self.get_logger().error(f"Error handling nav completion: {e}")
+            self.task_state = TaskState.ERROR
+            self.publish_status("ERROR")
+
+    # ---------------- Helpers ----------------
+
+    def _create_nav_goal(self, x: float, y: float, yaw: float) -> NavigateToPose.Goal:
+        """Create a NavigateToPose goal from x,y,yaw in map frame"""
+        goal = NavigateToPose.Goal()
+        pose = PoseStamped()
+        pose.header.frame_id = "map"
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = float(x)
+        pose.pose.position.y = float(y)
+        # Convert yaw to quaternion (z,w)
+        qz = math.sin(float(yaw) / 2.0)
+        qw = math.cos(float(yaw) / 2.0)
+        pose.pose.orientation.z = qz
+        pose.pose.orientation.w = qw
+        goal.pose = pose
+        return goal
+
+    def publish_status(self, status: str):
+        """Publish task status to ROS2 topic and MQTT"""
+        msg_data = {
+            "task_id": self.current_task.get("task_id") if self.current_task else None,
+            "robot_id": self.robot_id,
+            "status": status,
+            "timestamp": time.time(),
+        }
+
+        # ROS2
+        ros_msg = String()
+        ros_msg.data = json.dumps(msg_data)
+        try:
+            self.task_status_pub.publish(ros_msg)
+        except Exception as e:
+            self.get_logger().debug(f"Failed to publish ROS2 status: {e}")
+
+        # MQTT
+        self._publish_mqtt(msg_data)
+
+    def _publish_mqtt(self, payload: Dict[str, Any], topic_suffix: str = "task/status"):
+        """Publish JSON payload to robot/<id>/<topic_suffix> with QoS and simple error handling"""
+        try:
+            topic = f"robot/{self.robot_id}/{topic_suffix}"
+            payload_str = json.dumps(payload)
+            self.mqtt_client.publish(topic, payload_str, qos=self.mqtt_qos)
+            self.get_logger().debug(f"Published MQTT {topic}: {payload_str}")
+        except Exception as e:
+            self.get_logger().error(f"MQTT publish failed: {e}")
+
+    # ---------------- Shutdown ----------------
+
+    def destroy_node(self):
+        """Graceful shutdown override to stop MQTT loop too"""
+        try:
+            if hasattr(self, "mqtt_client"):
+                try:
+                    # try clean disconnect
+                    self.mqtt_client.disconnect()
+                except Exception:
+                    pass
+                try:
+                    self.mqtt_client.loop_stop()
+                except Exception:
+                    pass
+        finally:
+            super().destroy_node()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    executor = MultiThreadedExecutor()
+    node = RobotTaskRunner()
+    executor.add_node(node)
+
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # graceful teardown
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,146 @@
+version: "3.9"
+
+services:
+  api:
+    build: ./backend
+    container_name: warebot-api
+    restart: always
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - mongo
+      - hivemq
+      - minio
+      - influxdb
+      - grafana
+    ports:
+      - "5000:5000"
+    networks:
+      - warebot-net
+
+  mongo:
+    image: mongo:7
+    container_name: warebot-mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - warebot-net
+
+  hivemq:
+    image: hivemq/hivemq4
+    container_name: warebot-hivemq
+    restart: always
+    ports:
+      - "1883:1883"     # MQTT Broker
+      - "8080:8080"     # HiveMQ Dashboard
+    networks:
+      - warebot-net
+
+  minio:
+    image: minio/minio
+    container_name: warebot-minio
+    restart: always
+    command: server /data --console-address ":9001" --address ":9000"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - warebot-net
+
+  minio_init:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+        echo '⏳ Waiting for MinIO to be ready...';
+        sleep 5;
+
+        echo '🔗 Setting MinIO alias...';
+        mc alias set local http://minio:9000 admin admin123;
+
+        echo '🪣 Creating buckets if not exist...';
+        mc mb -p local/products || true;
+        mc mb -p local/shelves || true;
+
+        echo '🌍 Making buckets public (anonymous READ)...';
+        mc anonymous set download local/products;
+        mc anonymous set download local/shelves;
+
+        echo '✅ Buckets \"products\" and \"shelves\" are public and ready!';
+      "
+    networks:
+      - warebot-net
+
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: warebot-influxdb
+    restart: always
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin123
+      DOCKER_INFLUXDB_INIT_ORG: warebot
+      DOCKER_INFLUXDB_INIT_BUCKET: telemetry
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: influx-token
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    networks:
+      - warebot-net
+
+  grafana:
+    image: grafana/grafana-oss:10.2.0
+    container_name: warebot-grafana
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_AUTH_ANONYMOUS_ORG_NAME: "Main Org."
+
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - influxdb
+    networks:
+      - warebot-net
+
+
+
+
+  chronograf:
+    image: chronograf:latest
+    container_name: warebot-chronograf
+    restart: always
+    ports:
+      - "8888:8888"
+    depends_on:
+      - influxdb
+    networks:
+      - warebot-net
+
+networks:
+  warebot-net:
+
+volumes:
+  mongo_data:
+  minio_data:
+  influxdb_data:
+  grafana_data:

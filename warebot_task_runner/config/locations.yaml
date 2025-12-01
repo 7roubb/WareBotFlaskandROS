@@ -1,0 +1,20 @@
+# Warehouse locations configuration
+
+shelves:
+  - id: "shelf_001"
+    basket_id: "basket_1"
+    pickup_pose:
+      x: 5.0
+      y: 3.0
+      yaw: 0.0
+
+drop_zones:
+  - id: "drop_zone_001"
+    x: 2.0
+    y: 15.0
+    yaw: 0.0
+
+reference_point:
+  x: 0.0
+  y: 0.0
+  yaw: 0.0

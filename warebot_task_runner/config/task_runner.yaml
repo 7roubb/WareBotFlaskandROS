@@ -1,0 +1,21 @@
+# Task runner configuration
+robot:
+  id: "robot_1"
+  namespace: "/robot_1"
+
+backend:
+  url: "http://localhost:5000"
+  timeout: 5
+
+mqtt:
+  host: "localhost"
+  port: 1883
+  topics:
+    task_assignment: "robot/{robot_id}/task/assignment"
+    task_status: "robot/{robot_id}/task/status"
+    reference_point: "robot/{robot_id}/reference_point/update"
+
+navigation:
+  action_server: "navigate_to_pose"
+  timeout: 300
+  frame_id: "map"
