@@ -81,6 +81,13 @@ class RobotTaskRunner(Node):
         # --- ROS2 publisher ---
         self.task_status_pub = self.create_publisher(String, f"/{self.robot_id}/task/status", 10)
 
+        # --- Robot position tracking (new) ---
+        self.robot_x = 0.0
+        self.robot_y = 0.0
+        self.robot_yaw = 0.0
+        self.last_position_update = time.time()
+        self._position_lock = threading.Lock()
+
         # --- MQTT client setup (paho-mqtt v2.x compatible) ---
         try:
             self.mqtt_client = mqtt.Client(
@@ -208,6 +215,7 @@ class RobotTaskRunner(Node):
                 "task_id": task_data.get("task_id"),
                 "robot_id": self.robot_id,
                 "status": "REJECTED_BUSY",
+                "reason": f"Robot already in state {self.task_state.value}",
                 "timestamp": time.time()
             })
             return
@@ -217,6 +225,14 @@ class RobotTaskRunner(Node):
         for f in required:
             if f not in task_data:
                 self.get_logger().error(f"Task missing required field: {f}")
+                # Publish error
+                self._publish_mqtt({
+                    "task_id": task_data.get("task_id"),
+                    "robot_id": self.robot_id,
+                    "status": "ERROR",
+                    "reason": f"Missing required field: {f}",
+                    "timestamp": time.time()
+                })
                 return
 
         self.current_task = task_data
@@ -237,6 +253,7 @@ class RobotTaskRunner(Node):
 
         self.get_logger().info(
             f"Task assigned: {task_data.get('task_id')} | "
+            f"Type: {task_data.get('task_type', 'UNKNOWN')} | "
             f"Pickup: ({task_data.get('pickup_x')},{task_data.get('pickup_y')}) | "
             f"Drop: ({task_data.get('drop_x')},{task_data.get('drop_y')})"
         )
@@ -332,12 +349,27 @@ class RobotTaskRunner(Node):
             self.get_logger().error(f"Failed to get goal handle: {e}")
             self.task_state = TaskState.ERROR
             self.publish_status("ERROR")
+            # Publish detailed error
+            self._publish_mqtt({
+                "task_id": self.current_task.get("task_id") if self.current_task else None,
+                "robot_id": self.robot_id,
+                "status": "ERROR",
+                "reason": f"Failed to get goal handle: {str(e)}",
+                "timestamp": time.time()
+            }, topic_suffix="task/error")
             return
 
         if not handle.accepted:
             self.get_logger().error("Nav2 rejected goal")
             self.task_state = TaskState.ERROR
             self.publish_status("ERROR")
+            self._publish_mqtt({
+                "task_id": self.current_task.get("task_id") if self.current_task else None,
+                "robot_id": self.robot_id,
+                "status": "ERROR",
+                "reason": "Nav2 server rejected goal",
+                "timestamp": time.time()
+            }, topic_suffix="task/error")
             return
 
         self.get_logger().info("Nav2 accepted goal, waiting for result...")
@@ -351,6 +383,27 @@ class RobotTaskRunner(Node):
             res = future.result()
             # res.status should be checked; but here we proceed on success
             self.get_logger().info(f"Reached destination (state={next_state.value})")
+
+            # Update position to reached destination
+            if self.current_task:
+                if next_state == TaskState.ARRIVED_AT_PICKUP:
+                    self.update_robot_position(
+                        float(self.current_task.get("pickup_x", 0.0)),
+                        float(self.current_task.get("pickup_y", 0.0)),
+                        float(self.current_task.get("pickup_yaw", 0.0))
+                    )
+                elif next_state == TaskState.ARRIVED_AT_DROP:
+                    self.update_robot_position(
+                        float(self.current_task.get("drop_x", 0.0)),
+                        float(self.current_task.get("drop_y", 0.0)),
+                        float(self.current_task.get("drop_yaw", 0.0))
+                    )
+                elif next_state == TaskState.COMPLETED and self.reference_point:
+                    self.update_robot_position(
+                        self.reference_point["x"],
+                        self.reference_point["y"],
+                        self.reference_point["yaw"]
+                    )
 
             if next_state == TaskState.ARRIVED_AT_PICKUP:
                 self.task_state = TaskState.ATTACHED
@@ -378,6 +431,14 @@ class RobotTaskRunner(Node):
             self.get_logger().error(f"Error handling nav completion: {e}")
             self.task_state = TaskState.ERROR
             self.publish_status("ERROR")
+            # Publish detailed error info
+            self._publish_mqtt({
+                "task_id": self.current_task.get("task_id") if self.current_task else None,
+                "robot_id": self.robot_id,
+                "status": "ERROR",
+                "reason": f"Navigation completion error: {str(e)}",
+                "timestamp": time.time()
+            }, topic_suffix="task/error")
 
     # ---------------- Helpers ----------------
 
@@ -398,13 +459,30 @@ class RobotTaskRunner(Node):
         return goal
 
     def publish_status(self, status: str):
-        """Publish task status to ROS2 topic and MQTT"""
+        """Publish task status to ROS2 topic and MQTT (with extended tracking)"""
         msg_data = {
             "task_id": self.current_task.get("task_id") if self.current_task else None,
             "robot_id": self.robot_id,
             "status": status,
+            "task_type": self.current_task.get("task_type") if self.current_task else None,
+            "task_state": self.task_state.value,
             "timestamp": time.time(),
         }
+
+        # Include current progress if available
+        if self.current_task:
+            msg_data.update({
+                "shelf_id": self.current_task.get("shelf_id"),
+                "priority": self.current_task.get("priority"),
+                "pickup_location": {
+                    "x": float(self.current_task.get("pickup_x", 0.0)),
+                    "y": float(self.current_task.get("pickup_y", 0.0))
+                },
+                "drop_location": {
+                    "x": float(self.current_task.get("drop_x", 0.0)),
+                    "y": float(self.current_task.get("drop_y", 0.0))
+                }
+            })
 
         # ROS2
         ros_msg = String()
@@ -414,8 +492,20 @@ class RobotTaskRunner(Node):
         except Exception as e:
             self.get_logger().debug(f"Failed to publish ROS2 status: {e}")
 
-        # MQTT
+        # MQTT (publish to both task status and live progress)
         self._publish_mqtt(msg_data)
+        
+        # Also publish live progress update for real-time frontend tracking
+        try:
+            self._publish_mqtt({
+                "task_id": msg_data.get("task_id"),
+                "robot_id": self.robot_id,
+                "task_state": self.task_state.value,
+                "status": status,
+                "timestamp": time.time()
+            }, topic_suffix="task/progress")
+        except Exception as e:
+            self.get_logger().debug(f"Failed to publish task progress: {e}")
 
     def _publish_mqtt(self, payload: Dict[str, Any], topic_suffix: str = "task/status"):
         """Publish JSON payload to robot/<id>/<topic_suffix> with QoS and simple error handling"""
@@ -426,6 +516,46 @@ class RobotTaskRunner(Node):
             self.get_logger().debug(f"Published MQTT {topic}: {payload_str}")
         except Exception as e:
             self.get_logger().error(f"MQTT publish failed: {e}")
+
+    def update_robot_position(self, x: float, y: float, yaw: float = 0.0):
+        """Update robot's current position and publish to backend (for real-time tracking)"""
+        with self._position_lock:
+            self.robot_x = float(x)
+            self.robot_y = float(y)
+            self.robot_yaw = float(yaw)
+            self.last_position_update = time.time()
+        
+        # Publish position update to MQTT for backend tracking
+        try:
+            self._publish_mqtt({
+                "robot_id": self.robot_id,
+                "x": float(x),
+                "y": float(y),
+                "yaw": float(yaw),
+                "timestamp": time.time()
+            }, topic_suffix="position/update")
+        except Exception as e:
+            self.get_logger().debug(f"Failed to publish position update: {e}")
+        
+        # If currently carrying a shelf during task, publish shelf location too
+        if self.current_task and self.task_state in [
+            TaskState.ATTACHED,
+            TaskState.MOVING_TO_DROP,
+            TaskState.ARRIVED_AT_DROP
+        ]:
+            try:
+                shelf_id = self.current_task.get("shelf_id")
+                if shelf_id:
+                    self._publish_mqtt({
+                        "shelf_id": shelf_id,
+                        "robot_id": self.robot_id,
+                        "x": float(x),
+                        "y": float(y),
+                        "yaw": float(yaw),
+                        "timestamp": time.time()
+                    }, topic_suffix="shelf/location")
+            except Exception as e:
+                self.get_logger().debug(f"Failed to publish shelf location: {e}")
 
     # ---------------- Shutdown ----------------
 

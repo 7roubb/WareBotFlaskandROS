@@ -132,6 +132,10 @@ def create_app():
     socketio.init_app(app)
     app.extensions["socketio"] = socketio
 
+    # Register WebSocket handlers for live updates
+    from .routes.ws_live_updates import register_websocket_handlers
+    register_websocket_handlers(socketio)
+
     # Swagger documentation
     Swagger(app)
 

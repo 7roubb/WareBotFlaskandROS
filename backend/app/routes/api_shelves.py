@@ -69,6 +69,26 @@ def update_shelf_route(id):
     return jsonify(result) if result else ({"error": "not_found"}, 404)
 
 
+@shelves_bp.route("/<id>/location", methods=["PUT"])
+@admin_required
+def update_shelf_location_route(id):
+    """
+    Update shelf location (coordinates) in real-time.
+    Body: {"x_coord": <float>, "y_coord": <float>, "yaw": <float> (optional)}
+    """
+    try:
+        data = request.json or {}
+        x = data.get("x_coord")
+        y = data.get("y_coord")
+        yaw = data.get("yaw")
+        if x is None or y is None:
+            return {"error": "missing_coordinates", "required": ["x_coord", "y_coord"]}, 400
+        result = update_shelf(id, {"x_coord": float(x), "y_coord": float(y), "yaw": float(yaw or 0.0)})
+        return jsonify(result) if result else ({"error": "not_found"}, 404)
+    except (ValueError, TypeError) as e:
+        return {"error": "invalid_coordinates", "details": str(e)}, 400
+
+
 @shelves_bp.route("/<id>", methods=["DELETE"])
 @admin_required
 def delete_shelf_route(id):

@@ -1,7 +1,9 @@
 import json
+import time
 import paho.mqtt.client as mqtt
 from flask import current_app
 from influxdb_client import Point
+from datetime import datetime
 
 from .extensions import get_db, get_influx
 from .services import update_robot_telemetry, update_task_status
@@ -22,6 +24,15 @@ def ws_emit(event: str, data: dict):
         current_app.logger.error(f"[WS EMIT ERROR] {e}")
 
 
+def ws_emit_to_room(event: str, data: dict, room: str):
+    """Emit WebSocket event to a specific room (live update subscribers)"""
+    try:
+        socketio = current_app.extensions["socketio"]
+        socketio.emit(event, data, room=room)
+    except Exception as e:
+        current_app.logger.error(f"[WS EMIT ROOM ERROR] {e}")
+
+
 mqtt_client = None
 client_started = False
 
@@ -33,12 +44,15 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     app = userdata["app"]
     app.logger.info(f"[MQTT] Connected with code: {reason_code}")
 
-    # Telemetry + tasks + merged map
+    # Telemetry + tasks + merged map + shelf location updates
     client.subscribe("robots/mp400/+/status")
     client.subscribe("robots/mp400/+/task_status")
+    client.subscribe("robot/+/shelf/location")  # Real-time shelf location updates
+    client.subscribe("robot/+/position/update")  # Robot position updates
+    client.subscribe("robot/+/task/progress")  # Task progress tracking
     client.subscribe("warehouse/map")
 
-    app.logger.info("[MQTT] Subscribed to all robot + map topics")
+    app.logger.info("[MQTT] Subscribed to all robot + map + shelf location + position + task progress topics")
 
 
 # =========================================================
@@ -187,6 +201,166 @@ def on_message(client, userdata, msg):
 
             except Exception as e:
                 app.logger.error(f"[MQTT Map Update Error] {e}")
+
+        # =============================
+        # SHELF LOCATION UPDATE: robot/<robot_id>/shelf/location
+        # =============================
+        elif topic.startswith("robot/") and topic.endswith("/shelf/location"):
+            try:
+                data = json.loads(payload)
+                shelf_id = data.get("shelf_id")
+                x = data.get("x")
+                y = data.get("y")
+                yaw = data.get("yaw", 0.0)
+
+                if shelf_id and x is not None and y is not None:
+                    # Update shelf location in database (real-time)
+                    from bson import ObjectId
+                    try:
+                        oid = ObjectId(shelf_id)
+                        db.shelves.update_one(
+                            {"_id": oid, "deleted": False},
+                            {"$set": {
+                                "x_coord": float(x),
+                                "y_coord": float(y),
+                                "yaw": float(yaw),
+                                "updated_at": datetime.utcnow()
+                            }}
+                        )
+                        app.logger.info(f"[MQTT] Updated shelf {shelf_id} location: ({x}, {y})")
+                    except Exception:
+                        # Try by shelf_id field
+                        db.shelves.update_one(
+                            {"shelf_id": shelf_id, "deleted": False},
+                            {"$set": {
+                                "x_coord": float(x),
+                                "y_coord": float(y),
+                                "yaw": float(yaw),
+                                "updated_at": datetime.utcnow()
+                            }}
+                        )
+                        app.logger.info(f"[MQTT] Updated shelf {shelf_id} location: ({x}, {y})")
+
+                    # Notify frontend of shelf location change
+                    ws_emit("shelf_location_update", {
+                        "shelf_id": shelf_id,
+                        "x": float(x),
+                        "y": float(y),
+                        "yaw": float(yaw)
+                    })
+                    
+                    # Also emit to live shelves room for dashboard subscribers
+                    ws_emit_to_room("shelf_update", {
+                        "shelf_id": shelf_id,
+                        "x": float(x),
+                        "y": float(y),
+                        "yaw": float(yaw),
+                        "timestamp": datetime.utcnow().isoformat()
+                    }, room="shelves_room")
+
+            except Exception as e:
+                app.logger.error(f"[MQTT Shelf Location Update Error] {e}")
+
+        # =============================
+        # ROBOT POSITION UPDATE: robot/<robot_id>/position/update
+        # =============================
+        elif topic.startswith("robot/") and topic.endswith("/position/update"):
+            try:
+                robot_id = topic.split("/")[1]
+                data = json.loads(payload)
+                x = data.get("x")
+                y = data.get("y")
+                yaw = data.get("yaw", 0.0)
+
+                if x is not None and y is not None:
+                    # Update robot position in database
+                    db.robots.update_one(
+                        {"robot_id": robot_id, "deleted": False},
+                        {"$set": {
+                            "x": float(x),
+                            "y": float(y),
+                            "yaw": float(yaw),
+                            "updated_at": datetime.utcnow()
+                        }}
+                    )
+                    app.logger.debug(f"[MQTT] Updated robot {robot_id} position: ({x}, {y})")
+
+                    # Emit real-time position update to frontend
+                    ws_emit("robot_position_update", {
+                        "robot_id": robot_id,
+                        "x": float(x),
+                        "y": float(y),
+                        "yaw": float(yaw),
+                        "timestamp": data.get("timestamp", time.time())
+                    })
+                    
+                    # Also emit to live robots room for dashboard subscribers
+                    ws_emit_to_room("robot_update", {
+                        "robot_id": robot_id,
+                        "x": float(x),
+                        "y": float(y),
+                        "yaw": float(yaw),
+                        "timestamp": data.get("timestamp", time.time())
+                    }, room="robots_room")
+
+            except Exception as e:
+                app.logger.error(f"[MQTT Robot Position Update Error] {e}")
+
+        # =============================
+        # TASK PROGRESS UPDATE: robot/<robot_id>/task/progress
+        # =============================
+        elif topic.startswith("robot/") and topic.endswith("/task/progress"):
+            try:
+                data = json.loads(payload)
+                task_id = data.get("task_id")
+                robot_id = data.get("robot_id")
+                task_state = data.get("task_state")
+                status = data.get("status")
+
+                if task_id and status:
+                    # Update task status in database
+                    update_task_status(task_id, status)
+                    app.logger.debug(f"[MQTT] Task {task_id} progressed to {status}")
+
+                    # Write to InfluxDB for time-series tracking
+                    if influx_client is not None and write_api is not None:
+                        try:
+                            point = (
+                                Point("robot_task_progress")
+                                .tag("robot_id", robot_id or "unknown")
+                                .tag("task_state", task_state or "UNKNOWN")
+                                .field("task_id", str(task_id))
+                                .field("status", str(status))
+                                .time(datetime.utcnow())
+                            )
+                            write_api.write(
+                                bucket=current_app.config["INFLUX_BUCKET"],
+                                org=current_app.config["INFLUX_ORG"],
+                                record=point
+                            )
+                        except Exception as e:
+                            app.logger.error(f"[InfluxDB Task Progress Write Error] {e}")
+
+                    # Emit real-time task progress to frontend
+                    ws_emit("task_progress_update", {
+                        "task_id": task_id,
+                        "robot_id": robot_id,
+                        "task_state": task_state,
+                        "status": status,
+                        "timestamp": data.get("timestamp", time.time())
+                    })
+                    
+                    # Also emit to live tasks room for dashboard subscribers
+                    ws_emit_to_room("task_update", {
+                        "task_id": task_id,
+                        "robot_id": robot_id,
+                        "task_state": task_state,
+                        "status": status,
+                        "timestamp": data.get("timestamp", time.time())
+                    }, room="tasks_room")
+
+            except Exception as e:
+                app.logger.error(f"[MQTT Task Progress Update Error] {e}")
 
         # =============================
         # OTHER CUSTOM TOPICS

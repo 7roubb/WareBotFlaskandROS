@@ -8,6 +8,7 @@ from bson import ObjectId
 from ..models import TaskCreate
 from ..services.task_service import (
     create_task_and_assign,
+    resolve_task_coordinates,
     list_tasks,
 )
 from ..extensions import get_db
@@ -45,6 +46,41 @@ def list_tasks_route():
 
 
 # ---------------------------------------------------------
+# Get task by ID with state history
+# ---------------------------------------------------------
+@tasks_bp.route("/<id>", methods=["GET"])
+def get_task_route(id):
+    db = get_db()
+    try:
+        oid = ObjectId(id)
+    except Exception:
+        return jsonify({"error": "invalid_id"}), 400
+
+    task = db.tasks.find_one({"_id": oid})
+    if not task:
+        return jsonify({"error": "not_found"}), 404
+
+    # Include state transition history
+    try:
+        transitions = list(db.task_transitions.find({"task_id": id}).sort("timestamp", 1))
+        task["state_history"] = [
+            {
+                "from": t.get("from_state"),
+                "to": t.get("to_state"),
+                "timestamp": t.get("timestamp"),
+                "metadata": t.get("metadata", {})
+            }
+            for t in transitions
+        ]
+    except Exception:
+        task["state_history"] = []
+
+    # Serialize ObjectIds
+    from ..services.utils_service import serialize
+    return jsonify(serialize(task)), 200
+
+
+# ---------------------------------------------------------
 # Create + Assign Task
 # ---------------------------------------------------------
 @tasks_bp.route("/assign", methods=["POST"])
@@ -61,6 +97,9 @@ def create_task_route():
             priority=data["priority"],
             desc=data.get("description"),
             zone_id=data.get("zone_id"),
+            task_type=data.get("task_type", "PICKUP_AND_DELIVER"),
+            target_shelf_id=data.get("target_shelf_id"),
+            target_zone_id=data.get("target_zone_id"),
         )
     except ValueError as e:
         # map known errors to HTTP statuses
@@ -104,24 +143,38 @@ def create_task_route():
     if not robot_id_for_topic:
         robot_id_for_topic = task.get("assigned_robot_name")
 
-    # Build MQTT payload (matches RobotTaskRunner expectation)
+    # Resolve current coordinates from shelf/zone at publish time (not at creation)
+    try:
+        coords = resolve_task_coordinates(task.get("id"))
+    except ValueError:
+        # Fallback to stored coordinates if resolution fails
+        coords = {
+            "pickup_x": task.get("pickup_x") or task.get("target_x"),
+            "pickup_y": task.get("pickup_y") or task.get("target_y"),
+            "pickup_yaw": task.get("pickup_yaw") or task.get("target_yaw", 0.0),
+            "drop_x": task.get("drop_x", 0.0),
+            "drop_y": task.get("drop_y", 0.0),
+            "drop_yaw": task.get("drop_yaw", 0.0),
+        }
+
+    # Build MQTT payload with dynamic coordinates
     payload_dict = {
-        "task_id": task.get("id") or task.get("_id") or None,
-        "task": "pickup_and_deliver",
+        "task_id": task.get("id"),
+        "task_type": task.get("task_type", "PICKUP_AND_DELIVER"),
         "shelf_id": task.get("shelf_id"),
         "priority": task.get("priority"),
-        # pickup coordinates (robot expects pickup_x/pickup_y)
-        "pickup_x": task.get("pickup_x") or task.get("target_x"),
-        "pickup_y": task.get("pickup_y") or task.get("target_y"),
-        "pickup_yaw": task.get("pickup_yaw") or task.get("target_yaw") or 0.0,
-        # legacy keys
-        "target_x": task.get("target_x"),
-        "target_y": task.get("target_y"),
-        "target_yaw": task.get("target_yaw") or 0.0,
-        # drop coordinates
-        "drop_x": task.get("drop_x"),
-        "drop_y": task.get("drop_y"),
-        "drop_yaw": task.get("drop_yaw") or 0.0,
+        # Current coordinates resolved from shelf/zone
+        "pickup_x": coords["pickup_x"],
+        "pickup_y": coords["pickup_y"],
+        "pickup_yaw": coords["pickup_yaw"],
+        # Legacy keys
+        "target_x": coords["pickup_x"],
+        "target_y": coords["pickup_y"],
+        "target_yaw": coords["pickup_yaw"],
+        # Drop coordinates
+        "drop_x": coords["drop_x"],
+        "drop_y": coords["drop_y"],
+        "drop_yaw": coords["drop_yaw"],
         "drop_zone_id": task.get("drop_zone_id"),
     }
 
@@ -227,3 +280,50 @@ def delete_task_route(id):
         return {"error": "not_found"}, 404
 
     return {"result": "deleted"}, 200
+
+
+# ---------------------------------------------------------
+# Get live task statistics
+# ---------------------------------------------------------
+@tasks_bp.route("/stats/live", methods=["GET"])
+def get_live_stats():
+    """Return real-time task and robot statistics for dashboard"""
+    db = get_db()
+    
+    try:
+        # Task statistics
+        total_tasks = db.tasks.count_documents({})
+        assigned_tasks = db.tasks.count_documents({"status": "ASSIGNED"})
+        in_progress = db.tasks.count_documents({"status": {"$in": ["MOVING_TO_PICKUP", "ATTACHED", "MOVING_TO_DROP"]}})
+        completed_tasks = db.tasks.count_documents({"status": "COMPLETED"})
+        failed_tasks = db.tasks.count_documents({"status": "ERROR"})
+        
+        # Robot statistics
+        total_robots = db.robots.count_documents({"deleted": False})
+        available_robots = db.robots.count_documents({"deleted": False, "available": True})
+        busy_robots = db.robots.count_documents({"deleted": False, "available": False})
+        offline_robots = db.robots.count_documents({"deleted": False, "status": "OFFLINE"})
+        
+        # Average task duration
+        completed = list(db.tasks.find({"status": "COMPLETED", "duration_seconds": {"$exists": True}}))
+        avg_duration = sum(t.get("duration_seconds", 0) for t in completed) / max(len(completed), 1)
+        
+        return jsonify({
+            "tasks": {
+                "total": total_tasks,
+                "assigned": assigned_tasks,
+                "in_progress": in_progress,
+                "completed": completed_tasks,
+                "failed": failed_tasks,
+                "average_duration_seconds": round(avg_duration, 2)
+            },
+            "robots": {
+                "total": total_robots,
+                "available": available_robots,
+                "busy": busy_robots,
+                "offline": offline_robots
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

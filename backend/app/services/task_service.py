@@ -2,48 +2,98 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from bson import ObjectId
 from ..extensions import get_db
-from .utils_service import serialize  # adjust import if utils_service is elsewhere
+from .utils_service import serialize
 
 
 def _to_str_id(oid):
+    """Convert ObjectId to string, or return as-is if already string."""
     try:
         return str(oid)
     except Exception:
         return oid
 
 
-def create_task_and_assign(shelf_id: str, priority: int, desc: Optional[str] = None,
-                           zone_id: Optional[str] = None) -> Dict[str, Any]:
+def _resolve_shelf_coords(shelf_id: str) -> tuple:
     """
-    Create a task for the shelf and pick the best available robot based on distance + battery.
-    Returns the serialized task document.
-    Raises ValueError on invalid input or if no resources.
+    Dynamically resolve shelf coordinates at runtime.
+    Returns (x, y, yaw) tuple.
+    Raises ValueError if shelf not found.
     """
     db = get_db()
-
-    # Validate shelf id (allow ObjectId string or raw string that won't convert)
     try:
         shelf_oid = ObjectId(shelf_id)
         shelf = db.shelves.find_one({"_id": shelf_oid, "deleted": False})
     except Exception:
-        # try to find by shelf_id field (string)
         shelf = db.shelves.find_one({"shelf_id": shelf_id, "deleted": False})
 
     if not shelf:
+        raise ValueError(f"shelf_not_found: {shelf_id}")
+
+    x = float(shelf.get("x_coord", shelf.get("x", 0.0)))
+    y = float(shelf.get("y_coord", shelf.get("y", 0.0)))
+    yaw = float(shelf.get("yaw", 0.0))
+    return x, y, yaw
+
+
+def _resolve_zone_coords(zone_id: str) -> tuple:
+    """
+    Dynamically resolve zone coordinates at runtime.
+    Returns (x, y, yaw) tuple or (None, None, None) if not found.
+    """
+    if not zone_id:
+        return None, None, None
+
+    db = get_db()
+    try:
+        zone_oid = ObjectId(zone_id)
+        zone = db.zones.find_one({"_id": zone_oid, "deleted": False})
+    except Exception:
+        zone = db.zones.find_one({"zone_id": zone_id, "deleted": False})
+
+    if not zone:
+        return None, None, None
+
+    x = float(zone.get("x", 0.0))
+    y = float(zone.get("y", 0.0))
+    yaw = float(zone.get("yaw", 0.0))
+    return x, y, yaw
+
+
+def create_task_and_assign(
+    shelf_id: str,
+    priority: int,
+    desc: Optional[str] = None,
+    zone_id: Optional[str] = None,
+    task_type: str = "PICKUP_AND_DELIVER",
+    target_shelf_id: Optional[str] = None,
+    target_zone_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Create a task for the shelf and pick the best available robot.
+    Tasks now store references (shelf_id, zone_id) and resolve coordinates dynamically.
+    
+    task_type options:
+    - PICKUP_AND_DELIVER: Pick shelf, deliver to zone (or same location)
+    - MOVE_SHELF: Move shelf from current location to target_shelf_id location
+    - RETURN_SHELF: Return shelf from drop zone to home/original location
+    - REPOSITION: Reposition shelf to target_zone_id
+    
+    Raises ValueError on invalid input or missing resources.
+    """
+    db = get_db()
+
+    # Validate and resolve shelf location
+    try:
+        pickup_x, pickup_y, pickup_yaw = _resolve_shelf_coords(shelf_id)
+    except ValueError:
         raise ValueError("shelf_not_found")
 
-    # find available robots
-    robots_cursor = db.robots.find({"deleted": False, "available": True})
-    robots = list(robots_cursor)
+    # Find available robots
+    robots = list(db.robots.find({"deleted": False, "available": True}))
     if not robots:
         raise ValueError("no_available_robots")
 
-    # shelf coordinates
-    sx = float(shelf.get("x_coord", shelf.get("x", 0.0)))
-    sy = float(shelf.get("y_coord", shelf.get("y", 0.0)))
-    syaw = float(shelf.get("yaw", 0.0))
-
-    # choose best robot by simple cost function (distance * 0.7 + (100-battery)*0.3)
+    # Choose best robot (distance + battery heuristic)
     best = None
     best_cost = float("inf")
     for r in robots:
@@ -51,10 +101,9 @@ def create_task_and_assign(shelf_id: str, priority: int, desc: Optional[str] = N
         ry = r.get("y") if r.get("y") is not None else r.get("y_coord")
         battery = float(r.get("battery_level", 100))
         if rx is None or ry is None:
-            # skip robots with no telemetry location
             continue
         try:
-            dist = ((float(rx) - sx) ** 2 + (float(ry) - sy) ** 2) ** 0.5
+            dist = ((float(rx) - pickup_x) ** 2 + (float(ry) - pickup_y) ** 2) ** 0.5
         except Exception:
             continue
         cost = dist * 0.7 + (100.0 - battery) * 0.3
@@ -66,59 +115,120 @@ def create_task_and_assign(shelf_id: str, priority: int, desc: Optional[str] = N
         raise ValueError("no_suitable_robot")
 
     now = datetime.utcnow()
-
-    # assigned_robot_name: prefer robot_id field (e.g. "robot_1"), fallback to name
     assigned_robot_name = best.get("robot_id") or best.get("name") or ""
-    assigned_robot_db_id = best.get("_id")
+    assigned_robot_id = _to_str_id(best.get("_id"))
 
-    # Build task document
+    # Resolve drop location based on task_type
+    drop_x, drop_y, drop_yaw = pickup_x, pickup_y, pickup_yaw  # default: drop at pickup
+    drop_zone_id = zone_id
+
+    if task_type == "PICKUP_AND_DELIVER" and zone_id:
+        # Try to resolve zone coordinates
+        zx, zy, zyaw = _resolve_zone_coords(zone_id)
+        if zx is not None:
+            drop_x, drop_y, drop_yaw = zx, zy, zyaw
+    elif task_type == "MOVE_SHELF" and target_shelf_id:
+        # Destination is another shelf's location
+        try:
+            drop_x, drop_y, drop_yaw = _resolve_shelf_coords(target_shelf_id)
+        except ValueError:
+            # If target shelf not found, use same location
+            pass
+    elif task_type == "REPOSITION" and target_zone_id:
+        # Destination is a zone
+        zx, zy, zyaw = _resolve_zone_coords(target_zone_id)
+        if zx is not None:
+            drop_x, drop_y, drop_yaw = zx, zy, zyaw
+            drop_zone_id = target_zone_id
+
+    # Build task document (stores references, not coordinates)
     doc = {
         "shelf_id": shelf_id,
         "priority": int(priority),
         "description": desc,
+        "task_type": task_type,
         "assigned_robot_name": assigned_robot_name,
-        # store DB _id string so external systems can find robot easily
-        "assigned_robot_id": _to_str_id(assigned_robot_db_id),
-        # pickup = shelf location
-        "target_x": float(sx),
-        "target_y": float(sy),
-        "target_yaw": float(syaw),
-        # include pickup fields named like the robot node expects
-        "pickup_x": float(sx),
-        "pickup_y": float(sy),
-        "pickup_yaw": float(syaw),
-        # default drop == pickup; override below if zone provided
-        "drop_x": float(sx),
-        "drop_y": float(sy),
-        "drop_yaw": float(syaw),
-        "drop_zone_id": zone_id,
+        "assigned_robot_id": assigned_robot_id,
+        # Pickup = shelf (current coordinates stored at assignment time for reference)
+        "pickup_x": pickup_x,
+        "pickup_y": pickup_y,
+        "pickup_yaw": pickup_yaw,
+        # Legacy target_* names for backward compatibility
+        "target_x": pickup_x,
+        "target_y": pickup_y,
+        "target_yaw": pickup_yaw,
+        # Drop location (current coordinates at assignment time)
+        "drop_x": drop_x,
+        "drop_y": drop_y,
+        "drop_yaw": drop_yaw,
+        "drop_zone_id": drop_zone_id,
+        # Task-specific references for future dynamic resolution
+        "target_shelf_id": target_shelf_id,
+        "target_zone_id": target_zone_id,
+        # Status tracking
         "status": "ASSIGNED",
         "created_at": now,
         "updated_at": now,
     }
 
-    # If zone_id provided, try to resolve coordinates
-    if zone_id:
-        zone = None
-        try:
-            z_oid = ObjectId(zone_id)
-            zone = db.zones.find_one({"_id": z_oid, "deleted": False})
-        except Exception:
-            # try by zone_id field (string)
-            zone = db.zones.find_one({"zone_id": zone_id, "deleted": False})
-
-        if zone:
-            doc["drop_x"] = float(zone.get("x", doc["drop_x"]))
-            doc["drop_y"] = float(zone.get("y", doc["drop_y"]))
-            doc["drop_yaw"] = float(zone.get("yaw", doc["drop_yaw"]))
-            # store canonical zone _id string if available
-            if zone.get("_id"):
-                doc["drop_zone_id"] = _to_str_id(zone.get("_id"))
-
     # Insert and return serialized doc
     res = db.tasks.insert_one(doc)
     created = db.tasks.find_one({"_id": res.inserted_id})
     return serialize(created)
+
+
+def resolve_task_coordinates(task_id: str) -> Dict[str, float]:
+    """
+    Dynamically resolve current pickup and drop coordinates for a task
+    based on its referenced shelf/zone IDs.
+    Returns dict with pickup_x, pickup_y, pickup_yaw, drop_x, drop_y, drop_yaw.
+    Used when publishing MQTT to get latest coordinates.
+    """
+    db = get_db()
+    try:
+        task_oid = ObjectId(task_id)
+        task = db.tasks.find_one({"_id": task_oid})
+    except Exception:
+        task = None
+
+    if not task:
+        raise ValueError(f"task_not_found: {task_id}")
+
+    # Resolve pickup location (from shelf_id)
+    try:
+        px, py, pyaw = _resolve_shelf_coords(task["shelf_id"])
+    except ValueError:
+        # Fallback to stored values
+        px = task.get("pickup_x", 0.0)
+        py = task.get("pickup_y", 0.0)
+        pyaw = task.get("pickup_yaw", 0.0)
+
+    # Resolve drop location
+    task_type = task.get("task_type", "PICKUP_AND_DELIVER")
+    dx, dy, dyaw = px, py, pyaw  # default to pickup
+
+    if task_type == "PICKUP_AND_DELIVER" and task.get("drop_zone_id"):
+        zx, zy, zyaw = _resolve_zone_coords(task["drop_zone_id"])
+        if zx is not None:
+            dx, dy, dyaw = zx, zy, zyaw
+    elif task_type == "MOVE_SHELF" and task.get("target_shelf_id"):
+        try:
+            dx, dy, dyaw = _resolve_shelf_coords(task["target_shelf_id"])
+        except ValueError:
+            pass
+    elif task_type == "REPOSITION" and task.get("target_zone_id"):
+        zx, zy, zyaw = _resolve_zone_coords(task["target_zone_id"])
+        if zx is not None:
+            dx, dy, dyaw = zx, zy, zyaw
+
+    return {
+        "pickup_x": px,
+        "pickup_y": py,
+        "pickup_yaw": pyaw,
+        "drop_x": dx,
+        "drop_y": dy,
+        "drop_yaw": dyaw,
+    }
 
 
 def list_tasks() -> List[Dict[str, Any]]:
@@ -128,19 +238,76 @@ def list_tasks() -> List[Dict[str, Any]]:
 
 
 def update_task_status(task_id: str, status: str) -> bool:
+    """Update a task status. Returns True if successful."""
+    db = get_db()
+    try:
+        oid = ObjectId(task_id)
+    except Exception:
+        return False
+
+    upd = {"$set": {
+        "status": status,
+        "updated_at": datetime.utcnow()
+    }}
+    
+    # Track completion time for analytics
+    if status == "COMPLETED":
+        current_task = db.tasks.find_one({"_id": oid})
+        if current_task:
+            created_at = current_task.get("created_at", datetime.utcnow())
+            duration = (datetime.utcnow() - created_at).total_seconds()
+            upd["$set"]["completed_at"] = datetime.utcnow()
+            upd["$set"]["duration_seconds"] = duration
+            
+            # Mark robot as available again
+            robot_id = current_task.get("assigned_robot_id")
+            if robot_id:
+                try:
+                    oid_robot = ObjectId(robot_id)
+                    db.robots.update_one({"_id": oid_robot}, {"$set": {"available": True}})
+                except Exception:
+                    db.robots.update_one({"robot_id": robot_id}, {"$set": {"available": True}})
+    
+    # Track error states
+    if status == "ERROR":
+        upd["$set"]["error_at"] = datetime.utcnow()
+        # Mark robot as available again on error
+        current_task = db.tasks.find_one({"_id": oid})
+        if current_task:
+            robot_id = current_task.get("assigned_robot_id")
+            if robot_id:
+                try:
+                    oid_robot = ObjectId(robot_id)
+                    db.robots.update_one({"_id": oid_robot}, {"$set": {"available": True}})
+                except Exception:
+                    db.robots.update_one({"robot_id": robot_id}, {"$set": {"available": True}})
+
+    result = db.tasks.update_one({"_id": oid}, upd)
+    return result.modified_count > 0
+
+
+def record_task_state_transition(task_id: str, from_state: str, to_state: str, metadata: Optional[Dict] = None) -> bool:
     """
-    Update a task status. Returns True if update attempted.
-    If invalid task_id, returns False.
+    Record task state transitions for audit trail and analytics.
+    Helps track task lifecycle in detail.
     """
     db = get_db()
     try:
         oid = ObjectId(task_id)
     except Exception:
-        # maybe the client passed the stringified id already; try to find by id field
-        # we'll attempt to match either _id or id-like string
-        # but for update we need to return False if it's not a valid hex ObjectId
         return False
 
-    upd = {"$set": {"status": status, "updated_at": datetime.utcnow()}}
-    db.tasks.update_one({"_id": oid}, upd)
+    transition_doc = {
+        "task_id": task_id,
+        "from_state": from_state,
+        "to_state": to_state,
+        "timestamp": datetime.utcnow(),
+        "metadata": metadata or {}
+    }
+    
+    try:
+        db.task_transitions.insert_one(transition_doc)
+    except Exception:
+        pass  # If collection doesn't exist yet, just skip
+    
     return True

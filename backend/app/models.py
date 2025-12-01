@@ -175,6 +175,30 @@ class TaskCreate(BaseModel):
     priority: int = Field(default=1, ge=1, le=10)
     description: Optional[str] = None
     zone_id: Optional[str] = None
+    task_type: str = Field(default="PICKUP_AND_DELIVER")
+    # task_type values:
+    # - PICKUP_AND_DELIVER: pick shelf from current location, deliver to zone
+    # - MOVE_SHELF: move shelf to a new target location
+    # - RETURN_SHELF: return shelf from zone back to storage
+    # - REPOSITION: reposition shelf within warehouse
+    target_shelf_id: Optional[str] = None  # for MOVE_SHELF: destination shelf/location
+    target_zone_id: Optional[str] = None   # for REPOSITION: destination zone
+
+
+class TaskStatusEnum(str):
+    """Task status tracking with complete state machine"""
+    PENDING = "PENDING"
+    ASSIGNED = "ASSIGNED"
+    MOVING_TO_PICKUP = "MOVING_TO_PICKUP"
+    ARRIVED_AT_PICKUP = "ARRIVED_AT_PICKUP"
+    ATTACHED = "ATTACHED"
+    MOVING_TO_DROP = "MOVING_TO_DROP"
+    ARRIVED_AT_DROP = "ARRIVED_AT_DROP"
+    RELEASED = "RELEASED"
+    MOVING_TO_REFERENCE = "MOVING_TO_REFERENCE"
+    COMPLETED = "COMPLETED"
+    ERROR = "ERROR"
+    CANCELLED = "CANCELLED"
 
 
 # =========================================================
