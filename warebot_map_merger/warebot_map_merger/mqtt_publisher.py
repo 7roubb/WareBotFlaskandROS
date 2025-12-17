@@ -4,7 +4,7 @@ import paho.mqtt.client as mqtt
 
 
 class MQTTPublisher:
-    def __init__(self, host="localhost", port=1883, topic="warehouse/map"):
+    def __init__(self, host="localhost", port=1884, topic="warehouse/map"):
         self.topic = topic
 
         self.client = mqtt.Client(

@@ -26,8 +26,8 @@ class Config:
     # -----------------------------
     # MQTT
     # -----------------------------
-    MQTT_HOST = os.environ.get("MQTT_HOST", "hivemq")
-    MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
+    MQTT_HOST = os.environ.get("MQTT_HOST", "warebot-hivemq")
+    MQTT_PORT = int(os.environ.get("MQTT_PORT", 1884))
     MQTT_USERNAME = os.environ.get("MQTT_USERNAME")
     MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD")
 

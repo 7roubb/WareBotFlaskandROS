@@ -34,8 +34,11 @@ services:
     container_name: warebot-hivemq
     restart: always
     ports:
-      - "1883:1883"     # MQTT Broker
+      - "1884:1884"     # MQTT Broker (1884 on host -> 1884 inside container)
+      - "8883:8883"     # MQTT Broker (TLS)
       - "8080:8080"     # HiveMQ Dashboard
+    volumes:
+      - ./hivemq-config/config.xml:/opt/hivemq/conf/config.xml:ro
     networks:
       - warebot-net
 

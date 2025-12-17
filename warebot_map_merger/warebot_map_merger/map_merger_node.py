@@ -61,7 +61,7 @@ class MapMerger(Node):
         # ======================================================
         self.mqtt = MQTTPublisher(
             host="localhost",
-            port=1883,
+            port=1884,
             topic="warehouse/map",  # backend listens on this
         )
 

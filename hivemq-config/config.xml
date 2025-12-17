@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hivemq>
+  <listeners>
+    <!-- Plain TCP listener on port 1884 (valid HiveMQ 4 listener element with name) -->
+    <tcp-listener>
+      <name>plain-tcp</name>
+      <bind-address>0.0.0.0</bind-address>
+      <port>1884</port>
+    </tcp-listener>
+  </listeners>
+</hivemq>

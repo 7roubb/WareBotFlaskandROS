@@ -9,7 +9,7 @@ backend:
 
 mqtt:
   host: "localhost"
-  port: 1883
+  port: 1884
   topics:
     task_assignment: "robot/{robot_id}/task/assignment"
     task_status: "robot/{robot_id}/task/status"

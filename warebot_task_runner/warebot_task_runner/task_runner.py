@@ -51,7 +51,7 @@ class RobotTaskRunner(Node):
         # --- ROS2 parameters ---
         self.declare_parameter("robot_id", "robot_1")
         self.declare_parameter("mqtt_host", "localhost")
-        self.declare_parameter("mqtt_port", 1883)
+        self.declare_parameter("mqtt_port", 1884)
         self.declare_parameter("mqtt_qos", 1)
         self.declare_parameter("mqtt_reconnect_base", 1.0)   # seconds
         self.declare_parameter("mqtt_reconnect_max", 30.0)   # seconds

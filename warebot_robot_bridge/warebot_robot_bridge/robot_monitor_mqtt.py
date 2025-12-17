@@ -22,6 +22,16 @@ class RobotMonitor(Node):
       robots/mp400/<robot_name>/status
     """
 
+    @staticmethod
+    def _quaternion_to_yaw(qx, qy, qz, qw):
+        """Convert quaternion to yaw (rotation around z-axis) in radians."""
+        # Using standard quaternion to Euler conversion formula
+        # yaw = atan2(2(w*z + x*y), 1 - 2(y² + z²))
+        sinr_cosp = 2 * (qw * qz + qx * qy)
+        cosr_cosp = 1 - 2 * (qy * qy + qz * qz)
+        yaw = math.atan2(sinr_cosp, cosr_cosp)
+        return yaw
+
     def __init__(self):
         super().__init__("robot_monitor")
 
@@ -30,7 +40,7 @@ class RobotMonitor(Node):
         # ---------------------------
         self.declare_parameter("robot_name", "robot1")
         self.declare_parameter("mqtt_host", "localhost")
-        self.declare_parameter("mqtt_port", 1883)
+        self.declare_parameter("mqtt_port", 8883)
         self.declare_parameter("mqtt_username", "")
         self.declare_parameter("mqtt_password", "")
 
@@ -56,6 +66,7 @@ class RobotMonitor(Node):
         # ---------------------------
         self.x = 0.0
         self.y = 0.0
+        self.yaw = 0.0  # FULL ODOMETRY: Robot orientation (angle)
         self.batt = 100.0
         self.temp = 40.0
 
@@ -104,10 +115,22 @@ class RobotMonitor(Node):
     def _pose_amcl(self, msg):
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
+        # Extract yaw from quaternion (full odometry)
+        qx = msg.pose.pose.orientation.x
+        qy = msg.pose.pose.orientation.y
+        qz = msg.pose.pose.orientation.z
+        qw = msg.pose.pose.orientation.w
+        self.yaw = self._quaternion_to_yaw(qx, qy, qz, qw)
 
     def _pose_odom(self, msg):
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
+        # Extract yaw from quaternion (full odometry)
+        qx = msg.pose.pose.orientation.x
+        qy = msg.pose.pose.orientation.y
+        qz = msg.pose.pose.orientation.z
+        qw = msg.pose.pose.orientation.w
+        self.yaw = self._quaternion_to_yaw(qx, qy, qz, qw)
 
     def _battery_cb(self, msg):
         # If percentage 0→1 convert to %
@@ -164,6 +187,7 @@ class RobotMonitor(Node):
             "temperature": self.temp,
             "x": self.x,
             "y": self.y,
+            "yaw": self.yaw,
             "status": "IDLE",
             "timestamp": now,
         }
