@@ -204,6 +204,7 @@ def on_message(client, userdata, msg):
 
         # =============================
         # SHELF LOCATION UPDATE: robot/<robot_id>/shelf/location
+        # CRITICAL: STORAGE LOCATION MUST NEVER BE OVERWRITTEN BY DROP ZONES
         # =============================
         elif topic.startswith("robot/") and topic.endswith("/shelf/location"):
             try:
@@ -212,54 +213,63 @@ def on_message(client, userdata, msg):
                 x = data.get("x")
                 y = data.get("y")
                 yaw = data.get("yaw", 0.0)
+                task_id = data.get("task_id")  # Task context for audit trail
+                location_status = data.get("location_status", "IN_TRANSIT")
 
                 if shelf_id and x is not None and y is not None:
-                    # Update shelf location in database (real-time)
-                    from bson import ObjectId
-                    try:
-                        oid = ObjectId(shelf_id)
-                        db.shelves.update_one(
-                            {"_id": oid, "deleted": False},
-                            {"$set": {
-                                "x_coord": float(x),
-                                "y_coord": float(y),
-                                "yaw": float(yaw),
-                                "updated_at": datetime.utcnow()
-                            }}
-                        )
-                        app.logger.info(f"[MQTT] Updated shelf {shelf_id} location: ({x}, {y})")
-                    except Exception:
-                        # Try by shelf_id field
-                        db.shelves.update_one(
-                            {"shelf_id": shelf_id, "deleted": False},
-                            {"$set": {
-                                "x_coord": float(x),
-                                "y_coord": float(y),
-                                "yaw": float(yaw),
-                                "updated_at": datetime.utcnow()
-                            }}
-                        )
-                        app.logger.info(f"[MQTT] Updated shelf {shelf_id} location: ({x}, {y})")
-
-                    # Notify frontend of shelf location change
-                    ws_emit("shelf_location_update", {
-                        "shelf_id": shelf_id,
-                        "x": float(x),
-                        "y": float(y),
-                        "yaw": float(yaw)
-                    })
+                    # Import the shelf location service
+                    from .services.shelf_location_service import update_shelf_current_location, get_shelf_location_info
                     
-                    # Also emit to live shelves room for dashboard subscribers
-                    ws_emit_to_room("shelf_update", {
-                        "shelf_id": shelf_id,
-                        "x": float(x),
-                        "y": float(y),
-                        "yaw": float(yaw),
-                        "timestamp": datetime.utcnow().isoformat()
-                    }, room="shelves_room")
+                    # Update ONLY current location, NEVER storage location
+                    success = update_shelf_current_location(
+                        shelf_id,
+                        float(x),
+                        float(y),
+                        float(yaw),
+                        location_status=location_status,
+                        task_id=task_id
+                    )
+                    
+                    if success:
+                        app.logger.info(f"[MQTT] Updated shelf {shelf_id} current location: ({x}, {y}) status={location_status}")
+                    else:
+                        app.logger.warning(f"[MQTT] Failed to update shelf {shelf_id} location")
+                        return
+
+                    # Get complete location info for WebSocket with context
+                    location_info = get_shelf_location_info(shelf_id)
+                    
+                    if location_info:
+                        # Notify frontend of shelf location change with FULL CONTEXT
+                        ws_emit("shelf_location_update", {
+                            "shelf_id": shelf_id,
+                            "current_x": location_info["current_x"],
+                            "current_y": location_info["current_y"],
+                            "current_yaw": location_info["current_yaw"],
+                            "storage_x": location_info["storage_x"],
+                            "storage_y": location_info["storage_y"],
+                            "storage_yaw": location_info["storage_yaw"],
+                            "location_status": location_info["location_status"],
+                            "task_id": task_id,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        
+                        # Also emit to live shelves room for dashboard subscribers
+                        ws_emit_to_room("shelf_update", {
+                            "shelf_id": shelf_id,
+                            "current_x": location_info["current_x"],
+                            "current_y": location_info["current_y"],
+                            "current_yaw": location_info["current_yaw"],
+                            "storage_x": location_info["storage_x"],
+                            "storage_y": location_info["storage_y"],
+                            "storage_yaw": location_info["storage_yaw"],
+                            "location_status": location_info["location_status"],
+                            "task_id": task_id,
+                            "timestamp": datetime.utcnow().isoformat()
+                        }, room="shelves_room")
 
             except Exception as e:
-                app.logger.error(f"[MQTT Shelf Location Update Error] {e}")
+                app.logger.error(f"[MQTT Shelf Location Update Error] {e}", exc_info=True)
 
         # =============================
         # ROBOT POSITION UPDATE: robot/<robot_id>/position/update

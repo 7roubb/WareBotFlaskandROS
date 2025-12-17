@@ -1,8 +1,15 @@
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from bson import ObjectId
+from flask import current_app as app
 from ..extensions import get_db
 from .utils_service import serialize
+from .shelf_location_service import (
+    update_shelf_current_location,
+    restore_shelf_to_storage_location,
+    capture_shelf_location_snapshot,
+    get_shelf_location_info
+)
 
 
 def _to_str_id(oid):
@@ -238,49 +245,138 @@ def list_tasks() -> List[Dict[str, Any]]:
 
 
 def update_task_status(task_id: str, status: str) -> bool:
-    """Update a task status. Returns True if successful."""
+    """
+    Update a task status. Returns True if successful.
+    
+    CRITICAL: Handles task-type-specific logic:
+    - RETURN_SHELF completion: Restore shelf to storage location
+    - PICKUP_AND_DELIVER completion: Leave shelf at current (drop zone) location
+    - MOVE_SHELF completion: Keep shelf at target location
+    """
     db = get_db()
     try:
         oid = ObjectId(task_id)
     except Exception:
         return False
 
+    # Fetch current task to check its type and shelf
+    current_task = db.tasks.find_one({"_id": oid})
+    if not current_task:
+        return False
+    
+    task_type = current_task.get("task_type", "PICKUP_AND_DELIVER")
+    shelf_id = current_task.get("shelf_id")
+
     upd = {"$set": {
         "status": status,
         "updated_at": datetime.utcnow()
     }}
     
-    # Track completion time for analytics
+    # CRITICAL: Handle completion-specific logic
     if status == "COMPLETED":
-        current_task = db.tasks.find_one({"_id": oid})
-        if current_task:
-            created_at = current_task.get("created_at", datetime.utcnow())
-            duration = (datetime.utcnow() - created_at).total_seconds()
-            upd["$set"]["completed_at"] = datetime.utcnow()
-            upd["$set"]["duration_seconds"] = duration
+        completed_at = datetime.utcnow()
+        upd["$set"]["completed_at"] = completed_at
+        
+        # Track duration for analytics
+        created_at = current_task.get("created_at", completed_at)
+        duration = (completed_at - created_at).total_seconds()
+        upd["$set"]["duration_seconds"] = duration
+        
+        # CRITICAL: Task type-specific location handling
+        if task_type == "RETURN_SHELF" and shelf_id:
+            # Restore shelf to its STORAGE location (original warehouse position)
+            # This is the CORE FIX for the drop zone overwrite bug
+            restore_shelf_to_storage_location(shelf_id, task_id=task_id)
+            app.logger.info(f"[TASK COMPLETION] RETURN_SHELF task {task_id}: Restored shelf {shelf_id} to storage location")
+            upd["$set"]["completion_action"] = "RESTORED_TO_STORAGE"
             
-            # Mark robot as available again
-            robot_id = current_task.get("assigned_robot_id")
-            if robot_id:
-                try:
-                    oid_robot = ObjectId(robot_id)
-                    db.robots.update_one({"_id": oid_robot}, {"$set": {"available": True}})
-                except Exception:
-                    db.robots.update_one({"robot_id": robot_id}, {"$set": {"available": True}})
+        elif task_type == "PICKUP_AND_DELIVER" and shelf_id:
+            # Shelf stays at drop zone (current location)
+            # Mark it as delivered (at drop zone)
+            location_info = get_shelf_location_info(shelf_id)
+            if location_info:
+                update_shelf_current_location(
+                    shelf_id,
+                    location_info["current_x"],
+                    location_info["current_y"],
+                    location_info["current_yaw"],
+                    location_status="DELIVERED_AT_DROP_ZONE",
+                    task_id=task_id
+                )
+            upd["$set"]["completion_action"] = "DELIVERED_TO_DROP_ZONE"
+            app.logger.info(f"[TASK COMPLETION] PICKUP_AND_DELIVER task {task_id}: Shelf {shelf_id} delivered to drop zone")
+            
+        elif task_type == "MOVE_SHELF" and shelf_id:
+            # Shelf stays at target location
+            location_info = get_shelf_location_info(shelf_id)
+            if location_info:
+                update_shelf_current_location(
+                    shelf_id,
+                    location_info["current_x"],
+                    location_info["current_y"],
+                    location_info["current_yaw"],
+                    location_status="REPOSITIONED",
+                    task_id=task_id
+                )
+            upd["$set"]["completion_action"] = "MOVED_TO_TARGET"
+            app.logger.info(f"[TASK COMPLETION] MOVE_SHELF task {task_id}: Shelf {shelf_id} moved to target location")
+            
+        elif task_type == "REPOSITION" and shelf_id:
+            # Shelf stays at target zone
+            location_info = get_shelf_location_info(shelf_id)
+            if location_info:
+                update_shelf_current_location(
+                    shelf_id,
+                    location_info["current_x"],
+                    location_info["current_y"],
+                    location_info["current_yaw"],
+                    location_status="REPOSITIONED",
+                    task_id=task_id
+                )
+            upd["$set"]["completion_action"] = "REPOSITIONED_AT_ZONE"
+            app.logger.info(f"[TASK COMPLETION] REPOSITION task {task_id}: Shelf {shelf_id} repositioned at zone")
+        
+        # Mark robot as available again
+        robot_id = current_task.get("assigned_robot_id")
+        if robot_id:
+            try:
+                oid_robot = ObjectId(robot_id)
+                db.robots.update_one(
+                    {"_id": oid_robot},
+                    {"$set": {"available": True, "current_shelf_id": None}}
+                )
+            except Exception:
+                db.robots.update_one(
+                    {"robot_id": robot_id},
+                    {"$set": {"available": True, "current_shelf_id": None}}
+                )
     
     # Track error states
     if status == "ERROR":
         upd["$set"]["error_at"] = datetime.utcnow()
+        
+        # On error, try to restore shelf to storage location for safety
+        if shelf_id:
+            try:
+                restore_shelf_to_storage_location(shelf_id, task_id=task_id)
+                app.logger.warning(f"[TASK ERROR] Task {task_id} failed - restored shelf {shelf_id} to storage for safety")
+            except Exception as e:
+                app.logger.error(f"[TASK ERROR] Failed to restore shelf on error: {e}")
+        
         # Mark robot as available again on error
-        current_task = db.tasks.find_one({"_id": oid})
-        if current_task:
-            robot_id = current_task.get("assigned_robot_id")
-            if robot_id:
-                try:
-                    oid_robot = ObjectId(robot_id)
-                    db.robots.update_one({"_id": oid_robot}, {"$set": {"available": True}})
-                except Exception:
-                    db.robots.update_one({"robot_id": robot_id}, {"$set": {"available": True}})
+        robot_id = current_task.get("assigned_robot_id")
+        if robot_id:
+            try:
+                oid_robot = ObjectId(robot_id)
+                db.robots.update_one(
+                    {"_id": oid_robot},
+                    {"$set": {"available": True, "current_shelf_id": None}}
+                )
+            except Exception:
+                db.robots.update_one(
+                    {"robot_id": robot_id},
+                    {"$set": {"available": True, "current_shelf_id": None}}
+                )
 
     result = db.tasks.update_one({"_id": oid}, upd)
     return result.modified_count > 0

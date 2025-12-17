@@ -89,6 +89,97 @@ def update_shelf_location_route(id):
         return {"error": "invalid_coordinates", "details": str(e)}, 400
 
 
+@shelves_bp.route("/<id>/restore-location", methods=["PUT"])
+@admin_required
+def restore_shelf_location_route(id):
+    """
+    CRITICAL: Restore shelf to its STORAGE location (immutable original position).
+    
+    Used when:
+    - RETURN_SHELF task needs to complete
+    - Manual reset needed after error
+    - Shelf stuck at drop zone needs recovery
+    
+    This endpoint bypasses the normal location update and directly restores
+    to the shelf's storage_x, storage_y coordinates.
+    """
+    try:
+        from ..services.shelf_location_service import restore_shelf_to_storage_location
+        
+        success = restore_shelf_to_storage_location(id)
+        if not success:
+            return jsonify({"error": "shelf_not_found", "shelf_id": id}), 404
+        
+        from ..services.shelf_location_service import get_shelf_location_info
+        location_info = get_shelf_location_info(id)
+        
+        return jsonify({
+            "status": "restored",
+            "shelf_id": id,
+            "location": location_info
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": "restoration_failed", "details": str(e)}), 500
+
+
+@shelves_bp.route("/<id>/location-info", methods=["GET"])
+def get_shelf_location_info_route(id):
+    """
+    Get complete location information for a shelf.
+    
+    Returns:
+    {
+        "shelf_id": "...",
+        "storage_x": 10.0,        # Immutable original location
+        "storage_y": 20.0,
+        "storage_yaw": 0.0,
+        "current_x": 35.2,        # Current display location
+        "current_y": 40.1,
+        "current_yaw": 0.5,
+        "location_status": "AT_DROP_ZONE",  # Semantic status
+        "last_task_id": "...",
+        "updated_at": "2025-01-20T10:30:00Z"
+    }
+    """
+    try:
+        from ..services.shelf_location_service import get_shelf_location_info
+        
+        location_info = get_shelf_location_info(id)
+        if not location_info:
+            return jsonify({"error": "shelf_not_found", "shelf_id": id}), 404
+        
+        return jsonify(location_info), 200
+        
+    except Exception as e:
+        return jsonify({"error": "failed_to_get_location_info", "details": str(e)}), 500
+
+
+@shelves_bp.route("/<id>/location-history", methods=["GET"])
+def get_shelf_location_history_route(id):
+    """
+    Get location history/audit trail for a shelf.
+    
+    Query params:
+    - limit: Maximum number of records (default 50)
+    
+    Returns array of location change records with timestamps.
+    """
+    try:
+        from ..services.shelf_location_service import get_shelf_location_history
+        
+        limit = request.args.get("limit", 50, type=int)
+        history = get_shelf_location_history(id, limit=limit)
+        
+        return jsonify({
+            "shelf_id": id,
+            "history": history
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": "failed_to_get_history", "details": str(e)}), 500
+
+
 @shelves_bp.route("/<id>", methods=["DELETE"])
 @admin_required
 def delete_shelf_route(id):

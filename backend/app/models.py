@@ -76,11 +76,19 @@ class ShelfUpdate(BaseModel):
     level: Optional[int] = None
     available: Optional[bool] = None
     status: Optional[str] = None
+    
+    # CRITICAL FIX: Allow updating storage location fields (for manual reset only)
+    storage_x: Optional[float] = None
+    storage_y: Optional[float] = None
+    storage_yaw: Optional[float] = None
+    
+    # Location status tracking
+    location_status: Optional[str] = None
 
     # NEW — allow updating tag URL if needed (rare, but supported)
     april_tag_url: Optional[str] = None
 
-    @validator("warehouse_id", "status", "april_tag_url", pre=True)
+    @validator("warehouse_id", "status", "location_status", "april_tag_url", pre=True)
     def strip_strings(cls, v):
         return v.strip() if isinstance(v, str) else v
 
