@@ -23,6 +23,23 @@ def create_shelf(data: dict):
         "name": data.get("name", ""),
     }
 
+    # Initialize storage (immutable) coordinates. If provided, use them,
+    # otherwise initialize storage to the current coordinates.
+    storage_x = data.get("storage_x")
+    storage_y = data.get("storage_y")
+    storage_yaw = data.get("storage_yaw")
+
+    if storage_x is None:
+        storage_x = data["x_coord"]
+    if storage_y is None:
+        storage_y = data["y_coord"]
+    if storage_yaw is None:
+        storage_yaw = data.get("yaw", 0.0)
+
+    doc["storage_x"] = float(storage_x)
+    doc["storage_y"] = float(storage_y)
+    doc["storage_yaw"] = float(storage_yaw)
+
     res = db.shelves.insert_one(doc)
     shelf_id = str(res.inserted_id)
 

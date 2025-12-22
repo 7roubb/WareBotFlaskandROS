@@ -16,6 +16,7 @@ import threading
 from enum import Enum
 from typing import Optional, Dict, Any
 
+import requests
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -55,6 +56,9 @@ class RobotTaskRunner(Node):
         self.declare_parameter("mqtt_qos", 1)
         self.declare_parameter("mqtt_reconnect_base", 1.0)   # seconds
         self.declare_parameter("mqtt_reconnect_max", 30.0)   # seconds
+        self.declare_parameter("backend_host", "localhost")
+        self.declare_parameter("backend_port", 5000)
+        self.declare_parameter("backend_enabled", True)
 
         self.robot_id = self.get_parameter("robot_id").value
         self.mqtt_host = self.get_parameter("mqtt_host").value
@@ -62,8 +66,13 @@ class RobotTaskRunner(Node):
         self.mqtt_qos = int(self.get_parameter("mqtt_qos").value)
         self._reconnect_base = float(self.get_parameter("mqtt_reconnect_base").value)
         self._reconnect_max = float(self.get_parameter("mqtt_reconnect_max").value)
+        self.backend_host = self.get_parameter("backend_host").value
+        self.backend_port = int(self.get_parameter("backend_port").value)
+        self.backend_enabled = self.get_parameter("backend_enabled").value
 
         self.get_logger().info(f"Task Runner initialized for {self.robot_id}")
+        if self.backend_enabled:
+            self.get_logger().info(f"Backend API: {self.backend_host}:{self.backend_port}")
 
         # --- State ---
         self.current_task: Optional[Dict[str, Any]] = None
@@ -87,6 +96,7 @@ class RobotTaskRunner(Node):
         self.robot_yaw = 0.0
         self.last_position_update = time.time()
         self._position_lock = threading.Lock()
+        self.position_history = []  # Track movement history for analytics
 
         # --- MQTT client setup (paho-mqtt v2.x compatible) ---
         try:
@@ -524,6 +534,18 @@ class RobotTaskRunner(Node):
             self.robot_y = float(y)
             self.robot_yaw = float(yaw)
             self.last_position_update = time.time()
+            # Add to position history for analytics
+            self.position_history.append({
+                "timestamp": self.last_position_update,
+                "x": float(x),
+                "y": float(y),
+                "yaw": float(yaw),
+                "status": self.task_state.value
+            })
+        
+        # Send to backend REST API for real-time map updates
+        if self.backend_enabled and self.current_task:
+            self._send_position_to_backend(x, y, yaw)
         
         # Publish position update to MQTT for backend tracking
         try:
@@ -556,6 +578,34 @@ class RobotTaskRunner(Node):
                     }, topic_suffix="shelf/location")
             except Exception as e:
                 self.get_logger().debug(f"Failed to publish shelf location: {e}")
+    
+    def _send_position_to_backend(self, x: float, y: float, yaw: float):
+        """Send current position to backend API for real-time task tracking on map"""
+        if not self.current_task:
+            return
+        
+        task_id = self.current_task.get("task_id")
+        if not task_id:
+            return
+        
+        try:
+            url = f"http://{self.backend_host}:{self.backend_port}/api/tasks/realtime/{task_id}/position"
+            payload = {
+                "robot_id": self.robot_id,
+                "current_x": float(x),
+                "current_y": float(y),
+                "current_theta": float(yaw),
+                "status": self.task_state.value,
+                "phase": self.task_state.value,
+                "timestamp": time.time()
+            }
+            # Non-blocking request with 2 second timeout
+            requests.post(url, json=payload, timeout=2.0)
+            self.get_logger().debug(f"Position update sent to backend: ({x:.2f}, {y:.2f})")
+        except requests.exceptions.Timeout:
+            self.get_logger().debug("Backend position update timed out")
+        except Exception as e:
+            self.get_logger().debug(f"Failed to send position to backend: {e}")
 
     # ---------------- Shutdown ----------------
 

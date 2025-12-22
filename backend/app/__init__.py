@@ -142,6 +142,14 @@ def create_app():
     # Register Blueprints
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(api_bp, url_prefix="/api")
+    
+    # Register Real-time Task Routes
+    from .routes.task_realtime_routes import task_realtime_bp
+    app.register_blueprint(task_realtime_bp)
+    
+    # Register Task WebSocket Handlers
+    from .routes.task_websocket import register_task_websocket_handlers
+    register_task_websocket_handlers(socketio)
 
     # Start MQTT client
     from .mqtt_client import start_mqtt_client

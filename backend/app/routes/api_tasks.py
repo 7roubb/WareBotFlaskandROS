@@ -147,13 +147,13 @@ def create_task_route():
     try:
         coords = resolve_task_coordinates(task.get("id"))
     except ValueError:
-        # Fallback to stored coordinates if resolution fails
+        # Fallback to stored coordinates if resolution fails. Prefer origin snapshots (storage/pickup)
         coords = {
-            "pickup_x": task.get("pickup_x") or task.get("target_x"),
-            "pickup_y": task.get("pickup_y") or task.get("target_y"),
-            "pickup_yaw": task.get("pickup_yaw") or task.get("target_yaw", 0.0),
-            "drop_x": task.get("drop_x", 0.0),
-            "drop_y": task.get("drop_y", 0.0),
+            "pickup_x": task.get("origin_pickup_x") or task.get("pickup_x") or task.get("target_x"),
+            "pickup_y": task.get("origin_pickup_y") or task.get("pickup_y") or task.get("target_y"),
+            "pickup_yaw": task.get("origin_pickup_yaw") or task.get("pickup_yaw") or task.get("target_yaw") or 0.0,
+            "drop_x": task.get("drop_x", task.get("zone_x", 0.0)),
+            "drop_y": task.get("drop_y", task.get("zone_y", 0.0)),
             "drop_yaw": task.get("drop_yaw", 0.0),
         }
 

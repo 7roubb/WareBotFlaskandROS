@@ -54,9 +54,17 @@ class ProductUpdate(BaseModel):
 # =========================================================
 class ShelfCreate(BaseModel):
     warehouse_id: str = Field(..., min_length=1, max_length=100)
-    x_coord: int
-    y_coord: int
+    # Current coordinates (map coordinates where the shelf currently is)
+    x_coord: float
+    y_coord: float
     level: int
+
+    # Storage (immutable) coordinates. If provided at creation these will be used
+    # as the shelf's storage/home location; otherwise the current coordinates
+    # will be used to initialize storage fields by the service layer.
+    storage_x: Optional[float] = None
+    storage_y: Optional[float] = None
+    storage_yaw: Optional[float] = None
 
     available: bool = True
     status: str = "IDLE"
@@ -191,6 +199,13 @@ class TaskCreate(BaseModel):
     # - REPOSITION: reposition shelf within warehouse
     target_shelf_id: Optional[str] = None  # for MOVE_SHELF: destination shelf/location
     target_zone_id: Optional[str] = None   # for REPOSITION: destination zone
+    # Optional: origin/storage snapshots (populated by backend at creation time when available)
+    origin_storage_x: Optional[float] = None
+    origin_storage_y: Optional[float] = None
+    origin_storage_yaw: Optional[float] = None
+    origin_pickup_x: Optional[float] = None
+    origin_pickup_y: Optional[float] = None
+    origin_pickup_yaw: Optional[float] = None
 
 
 class TaskStatusEnum(str):

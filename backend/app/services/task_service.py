@@ -178,6 +178,21 @@ def create_task_and_assign(
         "updated_at": now,
     }
 
+    # Capture and persist storage snapshot (immutable) for this task
+    try:
+        snapshot = capture_shelf_location_snapshot(shelf_id)
+        if snapshot:
+            doc["origin_storage_x"] = snapshot.get("storage_x")
+            doc["origin_storage_y"] = snapshot.get("storage_y")
+            doc["origin_storage_yaw"] = snapshot.get("storage_yaw")
+            # Also capture pickup (current) location at assignment time
+            doc["origin_pickup_x"] = snapshot.get("pickup_x")
+            doc["origin_pickup_y"] = snapshot.get("pickup_y")
+            doc["origin_pickup_yaw"] = snapshot.get("pickup_yaw")
+    except Exception:
+        # never fail task creation because of snapshot
+        pass
+
     # Insert and return serialized doc
     res = db.tasks.insert_one(doc)
     created = db.tasks.find_one({"_id": res.inserted_id})
@@ -350,6 +365,36 @@ def update_task_status(task_id: str, status: str) -> bool:
                     {"robot_id": robot_id},
                     {"$set": {"available": True, "current_shelf_id": None}}
                 )
+
+    # Handle drop events: when robot places shelf at drop location but task not yet completed
+    if status in ("DROPPING", "DROPPED") and shelf_id:
+        # Use the task's configured drop coordinates (drop_x/drop_y)
+        try:
+            dx = float(current_task.get("drop_x", current_task.get("pickup_x", 0.0)))
+            dy = float(current_task.get("drop_y", current_task.get("pickup_y", 0.0)))
+            dyaw = float(current_task.get("drop_yaw", current_task.get("pickup_yaw", 0.0)))
+            update_shelf_current_location(
+                shelf_id,
+                dx,
+                dy,
+                dyaw,
+                location_status="AT_DROP_ZONE",
+                task_id=task_id
+            )
+            app.logger.info(f"[TASK DROP] Task {task_id}: Shelf {shelf_id} placed at drop zone ({dx},{dy})")
+        except Exception as e:
+            app.logger.error(f"[TASK DROP] Failed to record drop location for shelf {shelf_id}: {e}")
+
+    # When a task is returning (robot moves back), we intentionally DO NOT modify storage location
+    # Shelf remains at its 'current' location until the task reaches COMPLETED and logic there handles restoration
+
+    # On cancellation, attempt safe restore to storage for safety-critical flows
+    if status in ("CANCELLED", "ABORTED") and shelf_id:
+        try:
+            restore_shelf_to_storage_location(shelf_id, task_id=task_id)
+            app.logger.info(f"[TASK CANCEL] Task {task_id}: Restored shelf {shelf_id} to storage due to cancel/abort")
+        except Exception as e:
+            app.logger.error(f"[TASK CANCEL] Failed to restore shelf on cancel: {e}")
     
     # Track error states
     if status == "ERROR":
@@ -407,3 +452,197 @@ def record_task_state_transition(task_id: str, from_state: str, to_state: str, m
         pass  # If collection doesn't exist yet, just skip
     
     return True
+
+
+# =========================================================
+# REAL-TIME TASK TRACKING FOR MAP UPDATES
+# =========================================================
+def update_task_with_robot_position(task_id: str, robot_x: float, robot_y: float, status: str):
+    """
+    Update task with robot's current position and status.
+    Shelf location is FIXED and NEVER changes during task execution.
+    Only robot position is updated.
+    """
+    db = get_db()
+    now = datetime.utcnow()
+    
+    try:
+        oid = ObjectId(task_id)
+    except:
+        return False
+    
+    task = db.tasks.find_one({"_id": oid})
+    if not task:
+        return False
+    
+    # Update robot position and status
+    update_doc = {
+        "current_robot_x": robot_x,
+        "current_robot_y": robot_y,
+        "status": status,
+        "last_position_update": now,
+    }
+    
+    # Add to position history
+    position_entry = {
+        "timestamp": now,
+        "robot_x": robot_x,
+        "robot_y": robot_y,
+        "status": status,
+    }
+    
+    result = db.tasks.update_one(
+        {"_id": oid},
+        {
+            "$set": update_doc,
+            "$push": {"position_history": position_entry}
+        }
+    )
+    
+    return result.modified_count > 0
+
+
+def get_task_map_view(task_id: str):
+    """
+    Get task data for real-time map display.
+    Shelf location is FIXED. Only robot position changes.
+    """
+    db = get_db()
+    
+    try:
+        oid = ObjectId(task_id)
+    except:
+        return None
+    
+    task = db.tasks.find_one({"_id": oid})
+    if not task:
+        return None
+    
+    # Try to enrich shelf info from shelf_location_service if available
+    shelf_info = None
+    try:
+        shelf_info = get_shelf_location_info(task.get("shelf_id"))
+    except Exception:
+        shelf_info = None
+
+    # Prepare shelf representation including both storage (immutable) and current (mutable)
+    if shelf_info:
+        storage = {
+            "x": float(shelf_info.get("storage_x", 0)),
+            "y": float(shelf_info.get("storage_y", 0)),
+            "yaw": float(shelf_info.get("storage_yaw", 0)),
+        }
+        current = {
+            "x": float(shelf_info.get("current_x", 0)),
+            "y": float(shelf_info.get("current_y", 0)),
+            "yaw": float(shelf_info.get("current_yaw", 0)),
+        }
+    else:
+        # Fallback to task-stored snapshots (if created)
+        storage = {
+            "x": float(task.get("origin_storage_x", task.get("pickup_x", 0))),
+            "y": float(task.get("origin_storage_y", task.get("pickup_y", 0))),
+            "yaw": float(task.get("origin_storage_yaw", task.get("pickup_yaw", 0))),
+        }
+        current = {
+            "x": float(task.get("current_robot_x", task.get("pickup_x", 0))),
+            "y": float(task.get("current_robot_y", task.get("pickup_y", 0))),
+            "yaw": float(task.get("pickup_yaw", 0)),
+        }
+
+    return {
+        "task_id": str(task.get("_id")),
+        "robot_id": task.get("robot_id"),
+        "status": task.get("status"),
+        "type": task.get("task_type", task.get("type")),
+
+        "robot": {
+            "x": float(task.get("current_robot_x", 0)),
+            "y": float(task.get("current_robot_y", 0)),
+        },
+
+        "shelf": {
+            "id": task.get("shelf_id"),
+            "storage": storage,
+            "current": current,
+        },
+
+        "drop_zone": {
+            "id": task.get("drop_zone_id", task.get("zone_id")),
+            "x": float(task.get("drop_x", task.get("zone_x", 0))),
+            "y": float(task.get("drop_y", task.get("zone_y", 0))),
+        },
+
+        "phase": task.get("phase"),
+        "current_target": task.get("current_target"),
+
+        "created_at": task.get("created_at"),
+        "started_at": task.get("started_at"),
+        "last_updated": task.get("last_position_update"),
+    }
+
+
+def get_all_tasks_map_view():
+    """Get all active tasks formatted for map display."""
+    db = get_db()
+    tasks = list(db.tasks.find({"status": {"$in": ["ACTIVE", "PENDING", "IN_PROGRESS", "ASSIGNED", "MOVING_TO_SHELF", "MOVING_TO_DROP"]}}))
+
+    map_view = []
+    for task in tasks:
+        # try to enrich shelf info
+        shelf_info = None
+        try:
+            shelf_info = get_shelf_location_info(task.get("shelf_id"))
+        except Exception:
+            shelf_info = None
+
+        if shelf_info:
+            storage = {"x": float(shelf_info.get("storage_x", 0)), "y": float(shelf_info.get("storage_y", 0))}
+            current = {"x": float(shelf_info.get("current_x", 0)), "y": float(shelf_info.get("current_y", 0))}
+        else:
+            storage = {"x": float(task.get("origin_storage_x", task.get("pickup_x", 0))), "y": float(task.get("origin_storage_y", task.get("pickup_y", 0)))}
+            current = {"x": float(task.get("current_robot_x", task.get("pickup_x", 0))), "y": float(task.get("current_robot_y", task.get("pickup_y", 0)))}
+
+        map_view.append({
+            "task_id": str(task.get("_id")),
+            "robot_id": task.get("robot_id"),
+            "status": task.get("status"),
+            "type": task.get("task_type", task.get("type")),
+            "robot": {
+                "x": float(task.get("current_robot_x", 0)),
+                "y": float(task.get("current_robot_y", 0)),
+            },
+            "shelf": {
+                "id": task.get("shelf_id"),
+                "storage": storage,
+                "current": current,
+            },
+            "drop_zone": {
+                "id": task.get("drop_zone_id", task.get("zone_id")),
+                "x": float(task.get("drop_x", task.get("zone_x", 0))),
+                "y": float(task.get("drop_y", task.get("zone_y", 0))),
+            },
+            "phase": task.get("phase"),
+            "current_target": task.get("current_target"),
+        })
+
+    return map_view
+
+
+def emit_task_update_websocket(socketio, task_id: str):
+    """Emit task update to WebSocket clients for live map updates."""
+    map_data = get_task_map_view(task_id)
+    if map_data:
+        socketio.emit("task_update", {
+            "task": map_data,
+            "timestamp": datetime.utcnow().isoformat(),
+        }, broadcast=True)
+
+
+def emit_all_tasks_update_websocket(socketio):
+    """Emit all tasks update to WebSocket clients for live map."""
+    map_data = get_all_tasks_map_view()
+    socketio.emit("tasks_update", {
+        "tasks": map_data,
+        "timestamp": datetime.utcnow().isoformat(),
+    }, broadcast=True)
