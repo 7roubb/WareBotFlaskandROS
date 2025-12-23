@@ -10,6 +10,7 @@ from .config import Config
 from .extensions import init_extensions, get_db
 from .routes import api_bp
 from .auth_routes import auth_bp
+from flask import request, make_response
 
 
 # =========================================================
@@ -124,6 +125,19 @@ def create_app():
 
     # Enable CORS globally
     CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+    # Ensure preflight (OPTIONS) requests always return OK with CORS headers
+    @app.before_request
+    def _handle_options_preflight():
+        if request.method == 'OPTIONS':
+            resp = make_response(('', 200))
+            resp.headers['Access-Control-Allow-Origin'] = request.headers.get('Origin', '*')
+            resp.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
+            resp.headers['Access-Control-Allow-Headers'] = request.headers.get(
+                'Access-Control-Request-Headers', 'Authorization,Content-Type'
+            )
+            resp.headers['Access-Control-Allow-Credentials'] = 'true'
+            return resp
 
     # DB + JWT + MinIO + Influx
     init_extensions(app)

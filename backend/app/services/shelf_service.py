@@ -77,9 +77,36 @@ def update_shelf(id: str, data: dict):
     except:
         return None
 
+    # Prevent accidental modification of immutable storage coordinates
+    # Only allow when caller explicitly passes 'manual_reset': True
+    manual_reset = bool(data.pop("manual_reset", False))
+
+    # If storage fields present without manual_reset flag, reject the update
+    storage_keys = {"storage_x", "storage_y", "storage_yaw"}
+    if not manual_reset and any(k in data for k in storage_keys):
+        return {"error": "forbidden_to_modify_storage", "message": "storage_x/storage_y/storage_yaw are immutable; use admin storage-reset endpoint"}
+
+    # Normalize numeric fields
+    if "storage_x" in data:
+        data["storage_x"] = float(data["storage_x"]) if data["storage_x"] is not None else None
+    if "storage_y" in data:
+        data["storage_y"] = float(data["storage_y"]) if data["storage_y"] is not None else None
+    if "storage_yaw" in data:
+        data["storage_yaw"] = float(data["storage_yaw"]) if data["storage_yaw"] is not None else None
+
     data["updated_at"] = datetime.utcnow()
     db.shelves.update_one({"_id": oid, "deleted": False}, {"$set": data})
     return get_shelf(id)
+
+
+def set_shelf_storage_location(shelf_id: str, x: float, y: float, yaw: float = 0.0) -> bool:
+    """
+    Explicit admin-only setter for storage (immutable) coordinates.
+    Returns True if successful.
+    """
+    from .shelf_location_service import initialize_shelf_storage_location
+
+    return initialize_shelf_storage_location(shelf_id, x, y, yaw)
 
 
 def soft_delete_shelf(id: str):

@@ -12,6 +12,7 @@ from ..services.task_service import (
     emit_task_update_websocket,
     emit_all_tasks_update_websocket,
 )
+from .task_websocket import emit_task_status_change, emit_shelf_location_fixed
 
 task_realtime_bp = Blueprint("task_realtime", __name__, url_prefix="/api/tasks/realtime")
 
@@ -85,8 +86,22 @@ def update_task_status(task_id):
     if success:
         # Emit WebSocket update
         socketio = current_app.extensions.get("socketio")
+        # Enrich and emit status-specific events
+        try:
+            map_data = get_task_map_view(task_id)
+        except Exception:
+            map_data = None
+
         if socketio:
             emit_task_update_websocket(socketio, task_id)
+            # emit generic task_status_change for subscribers
+            emit_task_status_change(socketio, task_id, old_status, new_status, current_target, robot_x, robot_y)
+
+            # If this was a RETURN_SHELF completion, also notify that shelf was restored
+            if map_data and map_data.get("type") == "RETURN_SHELF" and new_status == "COMPLETED":
+                shelf = map_data.get("shelf", {})
+                storage = shelf.get("storage", {})
+                emit_shelf_location_fixed(socketio, task_id, shelf.get("id"), storage.get("x"), storage.get("y"))
         
         return jsonify({
             "success": True,

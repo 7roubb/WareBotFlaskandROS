@@ -66,6 +66,10 @@ def update_shelf_route(id):
         return handle_validation_error(e)
 
     result = update_shelf(id, data)
+    # If the service returned a forbidden error dict, propagate as 403
+    if isinstance(result, dict) and result.get("error") == "forbidden_to_modify_storage":
+        return jsonify(result), 403
+
     return jsonify(result) if result else ({"error": "not_found"}, 404)
 
 
@@ -121,6 +125,68 @@ def restore_shelf_location_route(id):
         
     except Exception as e:
         return jsonify({"error": "restoration_failed", "details": str(e)}), 500
+
+
+@shelves_bp.route("/<id>/restore", methods=["POST"])
+@admin_required
+def restore_shelf_route(id):
+    """
+    POST alias for restore-location for compatibility.
+    """
+    try:
+        from ..services.shelf_location_service import restore_shelf_to_storage_location, get_shelf_location_info
+
+        success = restore_shelf_to_storage_location(id)
+        if not success:
+            return jsonify({"error": "shelf_not_found", "shelf_id": id}), 404
+
+        location_info = get_shelf_location_info(id)
+        return jsonify({"success": True, "shelf_id": id, "location_status": "STORED", "storage": {"x": location_info.get("storage_x"), "y": location_info.get("storage_y")}}), 200
+
+    except Exception as e:
+        return jsonify({"error": "restoration_failed", "details": str(e)}), 500
+
+
+@shelves_bp.route("/<id>/storage", methods=["PUT"])
+@admin_required
+def set_shelf_storage_route(id):
+    """
+    Admin-only: set/override the immutable storage coordinates for a shelf.
+    Body: {"storage_x": float, "storage_y": float, "storage_yaw": float}
+    """
+    try:
+        data = request.json or {}
+        if "storage_x" not in data or "storage_y" not in data:
+            return jsonify({"error": "missing_storage_coordinates", "required": ["storage_x", "storage_y"]}), 400
+
+        sx = float(data.get("storage_x"))
+        sy = float(data.get("storage_y"))
+        syaw = float(data.get("storage_yaw", 0.0))
+
+        from ..services.shelf_service import set_shelf_storage_location
+
+        success = set_shelf_storage_location(id, sx, sy, syaw)
+        if not success:
+            return jsonify({"error": "shelf_not_found", "shelf_id": id}), 404
+
+        from ..services.shelf_location_service import get_shelf_location_info
+        location_info = get_shelf_location_info(id)
+
+        return jsonify({
+            "success": True,
+            "shelf_id": id,
+            "location_status": "STORED",
+            "storage": {
+                "x": location_info.get("storage_x"),
+                "y": location_info.get("storage_y"),
+                "yaw": location_info.get("storage_yaw"),
+            }
+        }), 200
+
+    except (ValueError, TypeError) as e:
+        return jsonify({"error": "invalid_input", "details": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": "failed_to_set_storage", "details": str(e)}), 500
 
 
 @shelves_bp.route("/<id>/location-info", methods=["GET"])
