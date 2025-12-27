@@ -26,7 +26,7 @@ def dashboard_shelf_summary():
         results.append({
             "id": sid,
             "name": s.get("name", ""),
-            "coords": [s.get("x_coord", 0), s.get("y_coord", 0)],
+            "coords": [s.get("current_x", s.get("x_coord", 0)), s.get("current_y", s.get("y_coord", 0))],
             "level": s.get("level", 1),
             "products": len(products),
             "total_items": total_items,

@@ -1,20 +1,26 @@
-from flask import Blueprint, request, jsonify
+# shelves_bp routes - FIXED VERSION with WebSocket support
+
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt
 from pydantic import ValidationError
+from datetime import datetime
 
 from ..models import ShelfCreate, ShelfUpdate
 from ..services import (
-    create_shelf, list_shelves, get_shelf,
-    update_shelf, soft_delete_shelf,
+    create_shelf,
+    list_shelves,
+    get_shelf,
+    update_shelf,
+    soft_delete_shelf,
     get_products_for_shelf,
 )
 
 shelves_bp = Blueprint("shelves", __name__)
 
-
 # =========================================================
 # HELPERS
 # =========================================================
+
 def admin_required(fn):
     from functools import wraps
 
@@ -30,147 +36,223 @@ def admin_required(fn):
 
 
 def handle_validation_error(err: ValidationError):
-    return jsonify({"error": "validation_error", "details": err.errors()}), 400
+    return jsonify({
+        "error": "validation_error",
+        "details": err.errors()
+    }), 400
+
+
+def emit_shelf_update(shelf_data):
+    """Emit shelf update to all WebSocket subscribers"""
+    try:
+        socketio = current_app.extensions.get("socketio")
+        if socketio and shelf_data:
+            socketio.emit("shelf_update", {
+                "id": str(shelf_data.get("_id")),
+                "warehouse_id": shelf_data.get("warehouse_id"),
+                "current_x": shelf_data.get("current_x"),
+                "current_y": shelf_data.get("current_y"),
+                "current_yaw": shelf_data.get("current_yaw"),
+                "storage_x": shelf_data.get("storage_x"),
+                "storage_y": shelf_data.get("storage_y"),
+                "storage_yaw": shelf_data.get("storage_yaw"),
+                "level": shelf_data.get("level"),
+                "status": shelf_data.get("status"),
+                "available": shelf_data.get("available"),
+                "timestamp": datetime.utcnow().isoformat(),
+            }, room="shelves_room")
+            print(f"[WebSocket] Emitted shelf_update for {shelf_data.get('_id')}")
+    except Exception as e:
+        print(f"[WebSocket Error] Failed to emit shelf_update: {e}")
+
+
+def emit_shelf_location_update(shelf_data):
+    """Emit shelf location-specific update"""
+    try:
+        socketio = current_app.extensions.get("socketio")
+        if socketio and shelf_data:
+            socketio.emit("shelf_location_update", {
+                "id": str(shelf_data.get("_id")),
+                "current_x": shelf_data.get("current_x"),
+                "current_y": shelf_data.get("current_y"),
+                "current_yaw": shelf_data.get("current_yaw"),
+                "timestamp": datetime.utcnow().isoformat(),
+            }, room="shelves_room")
+            print(f"[WebSocket] Emitted shelf_location_update for {shelf_data.get('_id')}")
+    except Exception as e:
+        print(f"[WebSocket Error] Failed to emit shelf_location_update: {e}")
 
 
 # =========================================================
 # SHELF CRUD
 # =========================================================
+
 @shelves_bp.route("", methods=["POST"])
 @admin_required
 def create_shelf_route():
     try:
-        data = ShelfCreate(**request.json).dict()
+        data = ShelfCreate(**(request.json or {})).dict()
     except ValidationError as e:
         return handle_validation_error(e)
-    return jsonify(create_shelf(data)), 201
+
+    result = create_shelf(data)
+    
+    # ✓ Emit WebSocket for new shelf
+    if result and not isinstance(result, dict) or result.get("error") is None:
+        emit_shelf_update(result)
+    
+    return jsonify(result), 201
 
 
 @shelves_bp.route("", methods=["GET"])
 def list_shelves_route():
-    return jsonify(list_shelves())
+    return jsonify(list_shelves()), 200
 
 
 @shelves_bp.route("/<id>", methods=["GET"])
 def get_shelf_route(id):
-    s = get_shelf(id)
-    return jsonify(s) if s else ({"error": "not_found"}, 404)
+    shelf = get_shelf(id)
+    return jsonify(shelf) if shelf else ({"error": "not_found"}, 404)
 
 
 @shelves_bp.route("/<id>", methods=["PUT"])
 @admin_required
 def update_shelf_route(id):
+    """Update shelf metadata (warehouse_id, level, available, status)
+    
+    NOTE: For location updates, use the dedicated /location endpoint
+    NOTE: For storage location updates, use the dedicated /storage endpoint (admin only)
+    """
     try:
-        data = ShelfUpdate(**request.json).dict(exclude_none=True)
+        data = ShelfUpdate(**(request.json or {})).dict(exclude_none=True)
     except ValidationError as e:
         return handle_validation_error(e)
 
     result = update_shelf(id, data)
-    # If the service returned a forbidden error dict, propagate as 403
+
     if isinstance(result, dict) and result.get("error") == "forbidden_to_modify_storage":
         return jsonify(result), 403
 
+    if result:
+        # ✓ Emit WebSocket for metadata update
+        emit_shelf_update(result)
+    
     return jsonify(result) if result else ({"error": "not_found"}, 404)
 
+
+# =========================================================
+# REAL-TIME LOCATION UPDATE (CURRENT LOCATION ONLY)
+# =========================================================
 
 @shelves_bp.route("/<id>/location", methods=["PUT"])
 @admin_required
 def update_shelf_location_route(id):
     """
-    Update shelf location (coordinates) in real-time.
-    Body: {"x_coord": <float>, "y_coord": <float>, "yaw": <float> (optional)}
+    Update CURRENT shelf location only (used by robots / live updates)
+    
+    ✓ Used for: Real-time robot position tracking
+    ✓ Updates: current_x, current_y, current_yaw
+    ✗ Does NOT update: storage_x, storage_y (immutable)
+
+    Body:
+    {
+        "current_x": float,
+        "current_y": float,
+        "current_yaw": float (optional)
+    }
     """
     try:
         data = request.json or {}
-        x = data.get("x_coord")
-        y = data.get("y_coord")
-        yaw = data.get("yaw")
-        if x is None or y is None:
-            return {"error": "missing_coordinates", "required": ["x_coord", "y_coord"]}, 400
-        result = update_shelf(id, {"x_coord": float(x), "y_coord": float(y), "yaw": float(yaw or 0.0)})
-        return jsonify(result) if result else ({"error": "not_found"}, 404)
-    except (ValueError, TypeError) as e:
-        return {"error": "invalid_coordinates", "details": str(e)}, 400
 
+        if "current_x" not in data or "current_y" not in data:
+            return jsonify({
+                "error": "missing_coordinates",
+                "required": ["current_x", "current_y"]
+            }), 400
+
+        payload = {
+            "current_x": float(data["current_x"]),
+            "current_y": float(data["current_y"]),
+        }
+
+        if "current_yaw" in data:
+            payload["current_yaw"] = float(data["current_yaw"])
+
+        result = update_shelf(id, payload)
+        
+        if result:
+            # ✓ Emit WebSocket for location update
+            emit_shelf_location_update(result)
+        
+        return jsonify(result) if result else ({"error": "not_found"}, 404)
+
+    except (ValueError, TypeError) as e:
+        return jsonify({"error": "invalid_coordinates", "details": str(e)}), 400
+
+
+# =========================================================
+# RESTORE TO STORAGE LOCATION
+# =========================================================
 
 @shelves_bp.route("/<id>/restore-location", methods=["PUT"])
 @admin_required
 def restore_shelf_location_route(id):
     """
-    CRITICAL: Restore shelf to its STORAGE location (immutable original position).
+    Restore shelf to its STORAGE (home) location.
+    Used by RETURN_SHELF task completion or manual recovery.
     
-    Used when:
-    - RETURN_SHELF task needs to complete
-    - Manual reset needed after error
-    - Shelf stuck at drop zone needs recovery
-    
-    This endpoint bypasses the normal location update and directly restores
-    to the shelf's storage_x, storage_y coordinates.
+    This copies: storage_x → current_x, storage_y → current_y, storage_yaw → current_yaw
     """
     try:
-        from ..services.shelf_location_service import restore_shelf_to_storage_location
-        
-        success = restore_shelf_to_storage_location(id)
-        if not success:
+        from ..services.shelf_location_service import (
+            restore_shelf_to_storage_location,
+            get_shelf_location_info,
+        )
+
+        if not restore_shelf_to_storage_location(id):
             return jsonify({"error": "shelf_not_found", "shelf_id": id}), 404
-        
-        from ..services.shelf_location_service import get_shelf_location_info
+
         location_info = get_shelf_location_info(id)
-        
+
+        # ✓ Get the updated shelf document for emission
+        result = get_shelf(id)
+        if result:
+            emit_shelf_location_update(result)
+
         return jsonify({
             "status": "restored",
             "shelf_id": id,
-            "location": location_info
+            "location": location_info,
         }), 200
-        
+
     except Exception as e:
-        return jsonify({"error": "restoration_failed", "details": str(e)}), 500
+        return jsonify({
+            "error": "restoration_failed",
+            "details": str(e)
+        }), 500
 
 
 @shelves_bp.route("/<id>/restore", methods=["POST"])
 @admin_required
 def restore_shelf_route(id):
     """
-    POST alias for restore-location for compatibility.
+    POST alias for restore-location (compatibility).
     """
     try:
-        from ..services.shelf_location_service import restore_shelf_to_storage_location, get_shelf_location_info
+        from ..services.shelf_location_service import (
+            restore_shelf_to_storage_location,
+            get_shelf_location_info,
+        )
 
-        success = restore_shelf_to_storage_location(id)
-        if not success:
+        if not restore_shelf_to_storage_location(id):
             return jsonify({"error": "shelf_not_found", "shelf_id": id}), 404
 
         location_info = get_shelf_location_info(id)
-        return jsonify({"success": True, "shelf_id": id, "location_status": "STORED", "storage": {"x": location_info.get("storage_x"), "y": location_info.get("storage_y")}}), 200
 
-    except Exception as e:
-        return jsonify({"error": "restoration_failed", "details": str(e)}), 500
-
-
-@shelves_bp.route("/<id>/storage", methods=["PUT"])
-@admin_required
-def set_shelf_storage_route(id):
-    """
-    Admin-only: set/override the immutable storage coordinates for a shelf.
-    Body: {"storage_x": float, "storage_y": float, "storage_yaw": float}
-    """
-    try:
-        data = request.json or {}
-        if "storage_x" not in data or "storage_y" not in data:
-            return jsonify({"error": "missing_storage_coordinates", "required": ["storage_x", "storage_y"]}), 400
-
-        sx = float(data.get("storage_x"))
-        sy = float(data.get("storage_y"))
-        syaw = float(data.get("storage_yaw", 0.0))
-
-        from ..services.shelf_service import set_shelf_storage_location
-
-        success = set_shelf_storage_location(id, sx, sy, syaw)
-        if not success:
-            return jsonify({"error": "shelf_not_found", "shelf_id": id}), 404
-
-        from ..services.shelf_location_service import get_shelf_location_info
-        location_info = get_shelf_location_info(id)
+        # ✓ Get the updated shelf document for emission
+        result = get_shelf(id)
+        if result:
+            emit_shelf_location_update(result)
 
         return jsonify({
             "success": True,
@@ -180,7 +262,75 @@ def set_shelf_storage_route(id):
                 "x": location_info.get("storage_x"),
                 "y": location_info.get("storage_y"),
                 "yaw": location_info.get("storage_yaw"),
-            }
+            },
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "error": "restoration_failed",
+            "details": str(e)
+        }), 500
+
+
+# =========================================================
+# ADMIN — SET STORAGE LOCATION
+# =========================================================
+
+@shelves_bp.route("/<id>/storage", methods=["PUT"])
+@admin_required
+def set_shelf_storage_route(id):
+    """
+    Admin-only: override STORAGE (home) location.
+    
+    ✓ Used for: Manual warehouse rebalancing
+    ✓ Updates: storage_x, storage_y, storage_yaw
+    ✗ Does NOT affect: current_x, current_y
+    
+    Body:
+    {
+        "storage_x": float,
+        "storage_y": float,
+        "storage_yaw": float (optional)
+    }
+    """
+    try:
+        data = request.json or {}
+
+        if "storage_x" not in data or "storage_y" not in data:
+            return jsonify({
+                "error": "missing_storage_coordinates",
+                "required": ["storage_x", "storage_y"]
+            }), 400
+
+        from ..services.shelf_service import set_shelf_storage_location
+        from ..services.shelf_location_service import get_shelf_location_info
+
+        success = set_shelf_storage_location(
+            id,
+            float(data["storage_x"]),
+            float(data["storage_y"]),
+            float(data.get("storage_yaw", 0.0)),
+        )
+
+        if not success:
+            return jsonify({"error": "shelf_not_found", "shelf_id": id}), 404
+
+        location_info = get_shelf_location_info(id)
+
+        # ✓ Get the updated shelf document for emission
+        result = get_shelf(id)
+        if result:
+            emit_shelf_update(result)  # Full update since storage changed
+
+        return jsonify({
+            "success": True,
+            "shelf_id": id,
+            "location_status": "STORED",
+            "storage": {
+                "x": location_info.get("storage_x"),
+                "y": location_info.get("storage_y"),
+                "yaw": location_info.get("storage_yaw"),
+            },
         }), 200
 
     except (ValueError, TypeError) as e:
@@ -189,74 +339,73 @@ def set_shelf_storage_route(id):
         return jsonify({"error": "failed_to_set_storage", "details": str(e)}), 500
 
 
+# =========================================================
+# LOCATION INFO & HISTORY
+# =========================================================
+
 @shelves_bp.route("/<id>/location-info", methods=["GET"])
 def get_shelf_location_info_route(id):
-    """
-    Get complete location information for a shelf.
-    
-    Returns:
-    {
-        "shelf_id": "...",
-        "storage_x": 10.0,        # Immutable original location
-        "storage_y": 20.0,
-        "storage_yaw": 0.0,
-        "current_x": 35.2,        # Current display location
-        "current_y": 40.1,
-        "current_yaw": 0.5,
-        "location_status": "AT_DROP_ZONE",  # Semantic status
-        "last_task_id": "...",
-        "updated_at": "2025-01-20T10:30:00Z"
-    }
-    """
     try:
         from ..services.shelf_location_service import get_shelf_location_info
-        
-        location_info = get_shelf_location_info(id)
-        if not location_info:
-            return jsonify({"error": "shelf_not_found", "shelf_id": id}), 404
-        
-        return jsonify(location_info), 200
-        
+
+        info = get_shelf_location_info(id)
+        return jsonify(info) if info else ({"error": "shelf_not_found"}, 404)
+
     except Exception as e:
-        return jsonify({"error": "failed_to_get_location_info", "details": str(e)}), 500
+        return jsonify({
+            "error": "failed_to_get_location_info",
+            "details": str(e)
+        }), 500
 
 
 @shelves_bp.route("/<id>/location-history", methods=["GET"])
 def get_shelf_location_history_route(id):
-    """
-    Get location history/audit trail for a shelf.
-    
-    Query params:
-    - limit: Maximum number of records (default 50)
-    
-    Returns array of location change records with timestamps.
-    """
     try:
         from ..services.shelf_location_service import get_shelf_location_history
-        
+
         limit = request.args.get("limit", 50, type=int)
         history = get_shelf_location_history(id, limit=limit)
-        
+
         return jsonify({
             "shelf_id": id,
-            "history": history
+            "history": history,
         }), 200
-        
-    except Exception as e:
-        return jsonify({"error": "failed_to_get_history", "details": str(e)}), 500
 
+    except Exception as e:
+        return jsonify({
+            "error": "failed_to_get_history",
+            "details": str(e)
+        }), 500
+
+
+# =========================================================
+# DELETE
+# =========================================================
 
 @shelves_bp.route("/<id>", methods=["DELETE"])
 @admin_required
 def delete_shelf_route(id):
     if not soft_delete_shelf(id):
         return {"error": "not_found"}, 404
-    return {"status": "deleted"}
+    
+    # ✓ Could emit deletion event if desired
+    try:
+        socketio = current_app.extensions.get("socketio")
+        if socketio:
+            socketio.emit("shelf_deleted", {
+                "id": id,
+                "timestamp": datetime.utcnow().isoformat(),
+            }, room="shelves_room")
+    except Exception as e:
+        print(f"[WebSocket Error] Failed to emit shelf_deleted: {e}")
+    
+    return {"status": "deleted"}, 200
 
 
 # =========================================================
 # SHELF → PRODUCTS
 # =========================================================
+
 @shelves_bp.route("/<id>/products", methods=["GET"])
 def shelf_products_route(id):
-    return jsonify(get_products_for_shelf(id))
+    return jsonify(get_products_for_shelf(id)), 200

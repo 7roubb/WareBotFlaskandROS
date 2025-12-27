@@ -144,7 +144,7 @@
     {
       "id": 5,
       "type": "stat",
-      "title": "Current Position (X,Y)",
+      "title": "Current Position (X,Y,Yaw)",
       "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
       "datasource": "InfluxDB",
       "targets": [
@@ -160,16 +160,73 @@
       }
     },
 
+    {
+      "id": 12,
+      "type": "gauge",
+      "title": "Robot Yaw (Orientation)",
+      "gridPos": { "x": 0, "y": 4, "w": 6, "h": 4 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "YAW",
+          "query": "from(bucket:\"telemetry\") |> range(start:-10m) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"yaw\") |> last()"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "min": -3.15,
+        "max": 3.15,
+        "thresholds": {
+          "steps": [
+            { "value": -3.15, "color": "blue" },
+            { "value": 0, "color": "green" },
+            { "value": 3.15, "color": "red" }
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rad",
+          "custom": {
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          }
+        }
+      }
+    },
+
   
     {
       "id": 6,
       "type": "timeseries",
       "title": "Temperature (°C)",
-      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 6 },
+      "gridPos": { "x": 6, "y": 4, "w": 6, "h": 6 },
       "datasource": "InfluxDB",
       "targets": [
         { "refId": "F", "query": "from(bucket:\"telemetry\") |> range(start:-2h) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"temperature\")" }
       ]
+    },
+
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Robot Yaw Over Time (radians)",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 6 },
+      "datasource": "InfluxDB",
+      "targets": [
+        { "refId": "YAW_TIME", "query": "from(bucket:\"telemetry\") |> range(start:-2h) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"yaw\")" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rad",
+          "custom": {
+            "lineWidth": 1
+          }
+        }
+      }
     },
 
 
@@ -177,7 +234,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "CPU Usage Over Time",
-      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 6 },
+      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 6 },
       "datasource": "InfluxDB",
       "targets": [
         { "refId": "G", "query": "from(bucket:\"telemetry\") |> range(start:-2h) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"cpu_usage\")" }
@@ -188,7 +245,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "Battery Drain Over Time",
-      "gridPos": { "x": 0, "y": 10, "w": 12, "h": 6 },
+      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 6 },
       "datasource": "InfluxDB",
       "targets": [
         { "refId": "H", "query": "from(bucket:\"telemetry\") |> range(start:-8h) |> filter(fn:(r)=>r.robot==\"${robot}\" and r._field==\"battery_level\")" }
@@ -199,7 +256,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "XY Live Path",
-      "gridPos": { "x": 12, "y": 10, "w": 12, "h": 6 },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 6 },
       "datasource": "InfluxDB",
       "targets": [
         {
@@ -214,7 +271,7 @@
       "id": 10,
       "type": "bargauge",
       "title": "Averages (Last 10 Minutes)",
-      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 6 },
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 6 },
       "datasource": "InfluxDB",
       "targets": [
         {
@@ -229,7 +286,7 @@
       "id": 11,
       "type": "timeseries",
       "title": "Status Timeline",
-      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 6 },
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 4 },
       "datasource": "InfluxDB",
       "targets": [
         {

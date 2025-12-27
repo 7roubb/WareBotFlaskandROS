@@ -1,6 +1,7 @@
 """
 Real-time task management API endpoints.
 Handles task lifecycle and robot position updates for live map.
+Properly integrates shelf restoration with WebSocket updates.
 """
 
 from flask import Blueprint, request, jsonify, current_app
@@ -11,8 +12,8 @@ from ..services.task_service import (
     get_all_tasks_map_view,
     emit_task_update_websocket,
     emit_all_tasks_update_websocket,
+    update_task_status,
 )
-from .task_websocket import emit_task_status_change, emit_shelf_location_fixed
 
 task_realtime_bp = Blueprint("task_realtime", __name__, url_prefix="/api/tasks/realtime")
 
@@ -59,9 +60,9 @@ def update_robot_position(task_id):
 
 
 @task_realtime_bp.route("/<task_id>/status", methods=["PUT"])
-def update_task_status(task_id):
+def update_task_status_route(task_id):
     """
-    Update task status and current target.
+    Update task status and trigger associated actions (shelf restoration, etc).
     
     Body: {
         "old_status": str,
@@ -70,6 +71,11 @@ def update_task_status(task_id):
         "robot_x": float (optional),
         "robot_y": float (optional)
     }
+    
+    This endpoint:
+    1. Updates task status (which triggers shelf restoration if needed)
+    2. Emits WebSocket updates to all subscribers
+    3. Handles RETURN_SHELF completion with shelf location notification
     """
     data = request.get_json()
     
@@ -79,29 +85,67 @@ def update_task_status(task_id):
     robot_x = data.get("robot_x")
     robot_y = data.get("robot_y")
     
-    # Update task
-    from ..services.task_service import update_task_status
+    # Update task status (this triggers shelf restoration if needed via update_task_status())
     success = update_task_status(task_id, new_status)
     
     if success:
-        # Emit WebSocket update
         socketio = current_app.extensions.get("socketio")
-        # Enrich and emit status-specific events
+        
+        # Fetch updated task data for WebSocket notifications
         try:
             map_data = get_task_map_view(task_id)
-        except Exception:
+        except Exception as e:
+            current_app.logger.error(f"Failed to get task map view: {e}")
             map_data = None
 
         if socketio:
+            from ..routes.task_websocket import (
+                emit_task_status_change,
+                emit_shelf_location_fixed
+            )
+            
+            # Emit task update
             emit_task_update_websocket(socketio, task_id)
-            # emit generic task_status_change for subscribers
-            emit_task_status_change(socketio, task_id, old_status, new_status, current_target, robot_x, robot_y)
+            
+            # Emit status change event
+            emit_task_status_change(
+                socketio,
+                task_id,
+                old_status,
+                new_status,
+                current_target,
+                robot_x,
+                robot_y
+            )
 
-            # If this was a RETURN_SHELF completion, also notify that shelf was restored
+            # ✓ CRITICAL: If this was RETURN_SHELF completion, notify of restoration
             if map_data and map_data.get("type") == "RETURN_SHELF" and new_status == "COMPLETED":
                 shelf = map_data.get("shelf", {})
                 storage = shelf.get("storage", {})
-                emit_shelf_location_fixed(socketio, task_id, shelf.get("id"), storage.get("x"), storage.get("y"))
+                
+                # Emit shelf restoration confirmation
+                emit_shelf_location_fixed(
+                    socketio,
+                    task_id,
+                    shelf.get("id"),
+                    storage.get("x"),
+                    storage.get("y")
+                )
+                
+                # ✓ Also emit shelf location update to shelf subscribers
+                try:
+                    from ..routes.api_shelves import emit_shelf_location_update
+                    emit_shelf_location_update({
+                        "id": shelf.get("id"),
+                        "current_x": storage.get("x"),
+                        "current_y": storage.get("y"),
+                        "current_yaw": storage.get("yaw"),
+                    })
+                except Exception as e:
+                    current_app.logger.warning(f"Failed to emit shelf location update: {e}")
+            
+            # Broadcast all tasks update to map subscribers
+            emit_all_tasks_update_websocket(socketio)
         
         return jsonify({
             "success": True,
@@ -197,6 +241,107 @@ def get_robot_tasks_for_map(robot_id):
         "count": len(map_data),
         "timestamp": datetime.utcnow().isoformat(),
     }), 200
+
+
+@task_realtime_bp.route("/<task_id>/restore-shelf", methods=["POST"])
+def restore_shelf_via_task(task_id):
+    """
+    Restore shelf to storage via task API.
+    
+    Useful for:
+    - Manual restoration if task gets stuck
+    - Administrative recovery operations
+    - Testing shelf restoration workflow
+    
+    This endpoint:
+    1. Fetches the task and shelf_id
+    2. Calls shelf restoration service
+    3. Emits WebSocket updates
+    4. Returns confirmation with location data
+    """
+    from bson import ObjectId
+    from ..extensions import get_db
+    from ..services.shelf_location_service import (
+        restore_shelf_to_storage_location,
+        get_shelf_location_info
+    )
+    
+    db = get_db()
+    
+    try:
+        oid = ObjectId(task_id)
+    except Exception:
+        return jsonify({"error": "invalid_task_id"}), 400
+    
+    task = db.tasks.find_one({"_id": oid})
+    if not task:
+        return jsonify({"error": "task_not_found"}), 404
+    
+    shelf_id = task.get("shelf_id")
+    if not shelf_id:
+        return jsonify({"error": "task_has_no_shelf"}), 400
+    
+    try:
+        # Restore shelf to storage
+        success = restore_shelf_to_storage_location(shelf_id, task_id=task_id)
+        
+        if not success:
+            return jsonify({
+                "error": "restoration_failed",
+                "message": f"Failed to restore shelf {shelf_id}"
+            }), 500
+        
+        # Get updated location info
+        location_info = get_shelf_location_info(shelf_id)
+        
+        # Emit WebSocket updates
+        socketio = current_app.extensions.get("socketio")
+        if socketio:
+            # Emit shelf location update
+            try:
+                from ..routes.api_shelves import emit_shelf_location_update
+                emit_shelf_location_update({
+                    "id": shelf_id,
+                    "current_x": location_info.get("current_x"),
+                    "current_y": location_info.get("current_y"),
+                    "current_yaw": location_info.get("current_yaw"),
+                })
+            except Exception as e:
+                current_app.logger.warning(f"Failed to emit shelf location update: {e}")
+            
+            # Emit task update
+            emit_task_update_websocket(socketio, task_id)
+            
+            # Emit all tasks update
+            emit_all_tasks_update_websocket(socketio)
+        
+        return jsonify({
+            "success": True,
+            "task_id": task_id,
+            "shelf_id": shelf_id,
+            "restored_to": {
+                "x": location_info.get("storage_x"),
+                "y": location_info.get("storage_y"),
+                "yaw": location_info.get("storage_yaw"),
+            },
+            "current_location": {
+                "x": location_info.get("current_x"),
+                "y": location_info.get("current_y"),
+                "yaw": location_info.get("current_yaw"),
+            },
+            "message": f"Shelf {shelf_id} successfully restored to storage",
+            "timestamp": datetime.utcnow().isoformat(),
+        }), 200
+    
+    except Exception as e:
+        current_app.logger.error(
+            f"Failed to restore shelf via task API: {str(e)}",
+            exc_info=True
+        )
+        return jsonify({
+            "error": "restoration_error",
+            "details": str(e)
+        }), 500
 
 
 @task_realtime_bp.route("/broadcast-map-update", methods=["POST"])

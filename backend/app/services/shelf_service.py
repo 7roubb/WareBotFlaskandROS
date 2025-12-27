@@ -1,119 +1,204 @@
 from datetime import datetime
 from bson import ObjectId
+
 from ..extensions import get_db
 from .utils_service import serialize
-from .apriltag_service import generate_apriltag, upload_apriltag, MAX_TAG_IDS
+from .apriltag_service import (
+    generate_apriltag,
+    upload_apriltag,
+    MAX_TAG_IDS,
+)
 
+# =========================================================
+# CREATE SHELF
+# =========================================================
 
 def create_shelf(data: dict):
     db = get_db()
     now = datetime.utcnow()
 
+    # -----------------------------
+    # CURRENT (LIVE) LOCATION
+    # -----------------------------
+    current_x = float(data["current_x"])
+    current_y = float(data["current_y"])
+    current_yaw = float(data.get("current_yaw", 0.0))
+
+    # -----------------------------
+    # STORAGE (HOME) LOCATION
+    # If not provided → copy from current
+    # -----------------------------
+    storage_x = float(data.get("storage_x", current_x))
+    storage_y = float(data.get("storage_y", current_y))
+    storage_yaw = float(data.get("storage_yaw", current_yaw))
+
     doc = {
         "warehouse_id": data["warehouse_id"],
-        "x_coord": data["x_coord"],
-        "y_coord": data["y_coord"],
+
+        # Current location (mutable)
+        "current_x": current_x,
+        "current_y": current_y,
+        "current_yaw": current_yaw,
+
+        # Storage location (immutable)
+        "storage_x": storage_x,
+        "storage_y": storage_y,
+        "storage_yaw": storage_yaw,
+
         "level": data["level"],
         "available": data.get("available", True),
         "status": data.get("status", "IDLE"),
+
+        "april_tag_url": None,
+        "april_tag_id": None,
+
         "created_at": now,
         "updated_at": now,
         "deleted": False,
-        "april_tag_url": None,
-        "name": data.get("name", ""),
     }
 
-    # Initialize storage (immutable) coordinates. If provided, use them,
-    # otherwise initialize storage to the current coordinates.
-    storage_x = data.get("storage_x")
-    storage_y = data.get("storage_y")
-    storage_yaw = data.get("storage_yaw")
-
-    if storage_x is None:
-        storage_x = data["x_coord"]
-    if storage_y is None:
-        storage_y = data["y_coord"]
-    if storage_yaw is None:
-        storage_yaw = data.get("yaw", 0.0)
-
-    doc["storage_x"] = float(storage_x)
-    doc["storage_y"] = float(storage_y)
-    doc["storage_yaw"] = float(storage_yaw)
-
     res = db.shelves.insert_one(doc)
-    shelf_id = str(res.inserted_id)
+    shelf_oid = res.inserted_id
+    shelf_id = str(shelf_oid)
 
-    raw_int = int(res.inserted_id.binary.hex(), 16)
+    # -----------------------------
+    # Generate AprilTag
+    # -----------------------------
+    raw_int = int(shelf_oid.binary.hex(), 16)
     tag_id = raw_int % MAX_TAG_IDS
 
     tag_png = generate_apriltag(tag_id)
     tag_url = upload_apriltag(tag_png, shelf_id)
 
     db.shelves.update_one(
-        {"_id": res.inserted_id},
+        {"_id": shelf_oid},
         {"$set": {"april_tag_url": tag_url, "april_tag_id": tag_id}},
     )
 
-    return serialize(db.shelves.find_one({"_id": res.inserted_id}))
+    return serialize(db.shelves.find_one({"_id": shelf_oid}))
 
 
-def get_shelf(id: str):
+# =========================================================
+# GET SHELF
+# =========================================================
+
+def get_shelf(shelf_id: str):
     db = get_db()
     try:
-        oid = ObjectId(id)
-    except:
+        oid = ObjectId(shelf_id)
+    except Exception:
         return None
+
     return serialize(db.shelves.find_one({"_id": oid, "deleted": False}))
 
 
+# =========================================================
+# LIST SHELVES
+# =========================================================
+
 def list_shelves():
-    return [serialize(s) for s in get_db().shelves.find({"deleted": False})]
+    db = get_db()
+    return [serialize(s) for s in db.shelves.find({"deleted": False})]
 
 
-def update_shelf(id: str, data: dict):
+# =========================================================
+# UPDATE SHELF
+# =========================================================
+
+def update_shelf(shelf_id: str, data: dict):
     db = get_db()
     try:
-        oid = ObjectId(id)
-    except:
+        oid = ObjectId(shelf_id)
+    except Exception:
         return None
 
-    # Prevent accidental modification of immutable storage coordinates
-    # Only allow when caller explicitly passes 'manual_reset': True
+    # -----------------------------
+    # Protect storage location
+    # -----------------------------
     manual_reset = bool(data.pop("manual_reset", False))
+    storage_fields = {"storage_x", "storage_y", "storage_yaw"}
 
-    # If storage fields present without manual_reset flag, reject the update
-    storage_keys = {"storage_x", "storage_y", "storage_yaw"}
-    if not manual_reset and any(k in data for k in storage_keys):
-        return {"error": "forbidden_to_modify_storage", "message": "storage_x/storage_y/storage_yaw are immutable; use admin storage-reset endpoint"}
+    if not manual_reset and any(k in data for k in storage_fields):
+        return {
+            "error": "forbidden_to_modify_storage",
+            "message": "Storage location is immutable. Use admin reset endpoint."
+        }
 
+    # -----------------------------
     # Normalize numeric fields
-    if "storage_x" in data:
-        data["storage_x"] = float(data["storage_x"]) if data["storage_x"] is not None else None
-    if "storage_y" in data:
-        data["storage_y"] = float(data["storage_y"]) if data["storage_y"] is not None else None
-    if "storage_yaw" in data:
-        data["storage_yaw"] = float(data["storage_yaw"]) if data["storage_yaw"] is not None else None
+    # -----------------------------
+    numeric_fields = {
+        "current_x",
+        "current_y",
+        "current_yaw",
+        "storage_x",
+        "storage_y",
+        "storage_yaw",
+    }
+
+    for key in numeric_fields:
+        if key in data and data[key] is not None:
+            data[key] = float(data[key])
 
     data["updated_at"] = datetime.utcnow()
-    db.shelves.update_one({"_id": oid, "deleted": False}, {"$set": data})
-    return get_shelf(id)
+
+    db.shelves.update_one(
+        {"_id": oid, "deleted": False},
+        {"$set": data},
+    )
+
+    return get_shelf(shelf_id)
 
 
-def set_shelf_storage_location(shelf_id: str, x: float, y: float, yaw: float = 0.0) -> bool:
+# =========================================================
+# ADMIN — SET STORAGE LOCATION
+# =========================================================
+
+def set_shelf_storage_location(
+    shelf_id: str,
+    x: float,
+    y: float,
+    yaw: float = 0.0,
+) -> bool:
     """
-    Explicit admin-only setter for storage (immutable) coordinates.
-    Returns True if successful.
+    Admin-only endpoint.
+    Explicitly resets the storage (home) location.
     """
-    from .shelf_location_service import initialize_shelf_storage_location
-
-    return initialize_shelf_storage_location(shelf_id, x, y, yaw)
-
-
-def soft_delete_shelf(id: str):
+    db = get_db()
     try:
-        oid = ObjectId(id)
-    except:
+        oid = ObjectId(shelf_id)
+    except Exception:
         return False
 
-    res = get_db().shelves.update_one({"_id": oid}, {"$set": {"deleted": True}})
+    res = db.shelves.update_one(
+        {"_id": oid, "deleted": False},
+        {
+            "$set": {
+                "storage_x": float(x),
+                "storage_y": float(y),
+                "storage_yaw": float(yaw),
+                "updated_at": datetime.utcnow(),
+            }
+        },
+    )
+
+    return res.modified_count > 0
+
+
+# =========================================================
+# SOFT DELETE
+# =========================================================
+
+def soft_delete_shelf(shelf_id: str) -> bool:
+    db = get_db()
+    try:
+        oid = ObjectId(shelf_id)
+    except Exception:
+        return False
+
+    res = db.shelves.update_one(
+        {"_id": oid},
+        {"$set": {"deleted": True, "updated_at": datetime.utcnow()}},
+    )
+
     return res.modified_count > 0

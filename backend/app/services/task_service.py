@@ -1,15 +1,15 @@
-from datetime import datetime
+"""
+Task service with proper shelf location management.
+Handles task lifecycle and shelf restoration on completion.
+"""
+
 from typing import Optional, Dict, Any, List
+from datetime import datetime
 from bson import ObjectId
 from flask import current_app as app
+
 from ..extensions import get_db
 from .utils_service import serialize
-from .shelf_location_service import (
-    update_shelf_current_location,
-    restore_shelf_to_storage_location,
-    capture_shelf_location_snapshot,
-    get_shelf_location_info
-)
 
 
 def _to_str_id(oid):
@@ -22,8 +22,8 @@ def _to_str_id(oid):
 
 def _resolve_shelf_coords(shelf_id: str) -> tuple:
     """
-    Dynamically resolve shelf coordinates at runtime.
-    Returns (x, y, yaw) tuple.
+    Dynamically resolve shelf CURRENT coordinates at runtime.
+    Returns (x, y, yaw) tuple for pickup location (uses current_* not storage).
     Raises ValueError if shelf not found.
     """
     db = get_db()
@@ -36,9 +36,33 @@ def _resolve_shelf_coords(shelf_id: str) -> tuple:
     if not shelf:
         raise ValueError(f"shelf_not_found: {shelf_id}")
 
-    x = float(shelf.get("x_coord", shelf.get("x", 0.0)))
-    y = float(shelf.get("y_coord", shelf.get("y", 0.0)))
-    yaw = float(shelf.get("yaw", 0.0))
+    # Use current_* fields (live location) for pickup, fallback to legacy x/x_coord
+    x = float(shelf.get("current_x", shelf.get("x_coord", shelf.get("x", 0.0))))
+    y = float(shelf.get("current_y", shelf.get("y_coord", shelf.get("y", 0.0))))
+    yaw = float(shelf.get("current_yaw", shelf.get("yaw", 0.0)))
+    return x, y, yaw
+
+
+def _resolve_shelf_storage_coords(shelf_id: str) -> tuple:
+    """
+    Dynamically resolve shelf STORAGE (home) coordinates at runtime.
+    Returns (x, y, yaw) tuple for storage/home location (immutable).
+    Raises ValueError if shelf not found.
+    """
+    db = get_db()
+    try:
+        shelf_oid = ObjectId(shelf_id)
+        shelf = db.shelves.find_one({"_id": shelf_oid, "deleted": False})
+    except Exception:
+        shelf = db.shelves.find_one({"shelf_id": shelf_id, "deleted": False})
+
+    if not shelf:
+        raise ValueError(f"shelf_not_found: {shelf_id}")
+
+    # Use storage_* fields (immutable home location)
+    x = float(shelf.get("storage_x", 0.0))
+    y = float(shelf.get("storage_y", 0.0))
+    yaw = float(shelf.get("storage_yaw", 0.0))
     return x, y, yaw
 
 
@@ -89,11 +113,51 @@ def create_task_and_assign(
     """
     db = get_db()
 
-    # Validate and resolve shelf location
-    try:
-        pickup_x, pickup_y, pickup_yaw = _resolve_shelf_coords(shelf_id)
-    except ValueError:
-        raise ValueError("shelf_not_found")
+    # For RETURN_SHELF tasks, pickup location is the CURRENT location, 
+    # and drop location is the STORAGE location
+    if task_type == "RETURN_SHELF":
+        # Start from current location
+        try:
+            pickup_x, pickup_y, pickup_yaw = _resolve_shelf_coords(shelf_id)
+        except ValueError:
+            raise ValueError("shelf_not_found")
+        
+        # Return to storage location
+        try:
+            drop_x, drop_y, drop_yaw = _resolve_shelf_storage_coords(shelf_id)
+        except ValueError:
+            raise ValueError("shelf_not_found")
+        
+        drop_zone_id = None
+    else:
+        # For all other tasks, validate and resolve shelf location
+        try:
+            pickup_x, pickup_y, pickup_yaw = _resolve_shelf_coords(shelf_id)
+        except ValueError:
+            raise ValueError("shelf_not_found")
+
+        # Resolve drop location based on task_type
+        drop_x, drop_y, drop_yaw = pickup_x, pickup_y, pickup_yaw  # default: drop at pickup
+        drop_zone_id = zone_id
+
+        if task_type == "PICKUP_AND_DELIVER" and zone_id:
+            # Try to resolve zone coordinates
+            zx, zy, zyaw = _resolve_zone_coords(zone_id)
+            if zx is not None:
+                drop_x, drop_y, drop_yaw = zx, zy, zyaw
+        elif task_type == "MOVE_SHELF" and target_shelf_id:
+            # Destination is another shelf's location
+            try:
+                drop_x, drop_y, drop_yaw = _resolve_shelf_coords(target_shelf_id)
+            except ValueError:
+                # If target shelf not found, use same location
+                pass
+        elif task_type == "REPOSITION" and target_zone_id:
+            # Destination is a zone
+            zx, zy, zyaw = _resolve_zone_coords(target_zone_id)
+            if zx is not None:
+                drop_x, drop_y, drop_yaw = zx, zy, zyaw
+                drop_zone_id = target_zone_id
 
     # Find available robots
     robots = list(db.robots.find({"deleted": False, "available": True}))
@@ -104,8 +168,9 @@ def create_task_and_assign(
     best = None
     best_cost = float("inf")
     for r in robots:
-        rx = r.get("x") if r.get("x") is not None else r.get("x_coord")
-        ry = r.get("y") if r.get("y") is not None else r.get("y_coord")
+        # Try current_x/current_y first (preferred), fallback to legacy x/y
+        rx = r.get("current_x") if r.get("current_x") is not None else r.get("x")
+        ry = r.get("current_y") if r.get("current_y") is not None else r.get("y")
         battery = float(r.get("battery_level", 100))
         if rx is None or ry is None:
             continue
@@ -124,31 +189,6 @@ def create_task_and_assign(
     now = datetime.utcnow()
     assigned_robot_name = best.get("robot_id") or best.get("name") or ""
     assigned_robot_id = _to_str_id(best.get("_id"))
-
-    # Resolve drop location based on task_type
-    drop_x, drop_y, drop_yaw = pickup_x, pickup_y, pickup_yaw  # default: drop at pickup
-    drop_zone_id = zone_id
-
-    if task_type == "PICKUP_AND_DELIVER" and zone_id:
-        # Try to resolve zone coordinates
-        zx, zy, zyaw = _resolve_zone_coords(zone_id)
-        if zx is not None:
-            drop_x, drop_y, drop_yaw = zx, zy, zyaw
-    elif task_type == "MOVE_SHELF" and target_shelf_id:
-        # Destination is another shelf's location
-        try:
-            drop_x, drop_y, drop_yaw = _resolve_shelf_coords(target_shelf_id)
-        except ValueError:
-            # If target shelf not found, use same location
-            pass
-    elif task_type == "REPOSITION" and target_zone_id:
-        # Destination is a zone
-        zx, zy, zyaw = _resolve_zone_coords(target_zone_id)
-        if zx is not None:
-            drop_x, drop_y, drop_yaw = zx, zy, zyaw
-            drop_zone_id = target_zone_id
-
-    # Build task document (stores references, not coordinates)
     doc = {
         "shelf_id": shelf_id,
         "priority": int(priority),
@@ -180,6 +220,7 @@ def create_task_and_assign(
 
     # Capture and persist storage snapshot (immutable) for this task
     try:
+        from .shelf_location_service import capture_shelf_location_snapshot
         snapshot = capture_shelf_location_snapshot(shelf_id)
         if snapshot:
             doc["origin_storage_x"] = snapshot.get("storage_x")
@@ -189,9 +230,9 @@ def create_task_and_assign(
             doc["origin_pickup_x"] = snapshot.get("pickup_x")
             doc["origin_pickup_y"] = snapshot.get("pickup_y")
             doc["origin_pickup_yaw"] = snapshot.get("pickup_yaw")
-    except Exception:
+    except Exception as e:
+        app.logger.warning(f"[TASK] Failed to capture shelf snapshot: {e}")
         # never fail task creation because of snapshot
-        pass
 
     # Insert and return serialized doc
     res = db.tasks.insert_one(doc)
@@ -205,6 +246,10 @@ def resolve_task_coordinates(task_id: str) -> Dict[str, float]:
     based on its referenced shelf/zone IDs.
     Returns dict with pickup_x, pickup_y, pickup_yaw, drop_x, drop_y, drop_yaw.
     Used when publishing MQTT to get latest coordinates.
+    
+    CRITICAL: For RETURN_SHELF tasks:
+    - pickup: Current shelf location
+    - drop: Storage (home) location
     """
     db = get_db()
     try:
@@ -216,7 +261,9 @@ def resolve_task_coordinates(task_id: str) -> Dict[str, float]:
     if not task:
         raise ValueError(f"task_not_found: {task_id}")
 
-    # Resolve pickup location (from shelf_id)
+    task_type = task.get("task_type", "PICKUP_AND_DELIVER")
+    
+    # Resolve pickup location (from shelf_id) - always current location
     try:
         px, py, pyaw = _resolve_shelf_coords(task["shelf_id"])
     except ValueError:
@@ -225,11 +272,19 @@ def resolve_task_coordinates(task_id: str) -> Dict[str, float]:
         py = task.get("pickup_y", 0.0)
         pyaw = task.get("pickup_yaw", 0.0)
 
-    # Resolve drop location
-    task_type = task.get("task_type", "PICKUP_AND_DELIVER")
+    # Resolve drop location based on task type
     dx, dy, dyaw = px, py, pyaw  # default to pickup
 
-    if task_type == "PICKUP_AND_DELIVER" and task.get("drop_zone_id"):
+    if task_type == "RETURN_SHELF":
+        # Return shelf to STORAGE location
+        try:
+            dx, dy, dyaw = _resolve_shelf_storage_coords(task["shelf_id"])
+        except ValueError:
+            # Fallback to stored drop coordinates
+            dx = task.get("drop_x", px)
+            dy = task.get("drop_y", py)
+            dyaw = task.get("drop_yaw", pyaw)
+    elif task_type == "PICKUP_AND_DELIVER" and task.get("drop_zone_id"):
         zx, zy, zyaw = _resolve_zone_coords(task["drop_zone_id"])
         if zx is not None:
             dx, dy, dyaw = zx, zy, zyaw
@@ -261,22 +316,27 @@ def list_tasks() -> List[Dict[str, Any]]:
 
 def update_task_status(task_id: str, status: str) -> bool:
     """
-    Update a task status. Returns True if successful.
+    Update task status with proper task-type-specific shelf location handling.
     
     CRITICAL: Handles task-type-specific logic:
-    - RETURN_SHELF completion: Restore shelf to storage location
-    - PICKUP_AND_DELIVER completion: Leave shelf at current (drop zone) location
-    - MOVE_SHELF completion: Keep shelf at target location
+    - RETURN_SHELF completion: Restore shelf to STORAGE location
+    - PICKUP_AND_DELIVER completion: Shelf stays at DROP ZONE
+    - MOVE_SHELF completion: Shelf stays at TARGET location
+    - REPOSITION completion: Shelf stays at TARGET ZONE
+    
+    Returns: bool - True if update succeeded, False otherwise
     """
     db = get_db()
     try:
         oid = ObjectId(task_id)
     except Exception:
+        app.logger.error(f"[Task] Invalid task ID: {task_id}")
         return False
 
     # Fetch current task to check its type and shelf
     current_task = db.tasks.find_one({"_id": oid})
     if not current_task:
+        app.logger.error(f"[Task] Task not found: {task_id}")
         return False
     
     task_type = current_task.get("task_type", "PICKUP_AND_DELIVER")
@@ -287,7 +347,9 @@ def update_task_status(task_id: str, status: str) -> bool:
         "updated_at": datetime.utcnow()
     }}
     
+    # =========================================================
     # CRITICAL: Handle completion-specific logic
+    # =========================================================
     if status == "COMPLETED":
         completed_at = datetime.utcnow()
         upd["$set"]["completed_at"] = completed_at
@@ -297,82 +359,198 @@ def update_task_status(task_id: str, status: str) -> bool:
         duration = (completed_at - created_at).total_seconds()
         upd["$set"]["duration_seconds"] = duration
         
-        # CRITICAL: Task type-specific location handling
+        # =========================================================
+        # TASK-TYPE-SPECIFIC SHELF LOCATION HANDLING
+        # =========================================================
+        
         if task_type == "RETURN_SHELF" and shelf_id:
-            # Restore shelf to its STORAGE location (original warehouse position)
-            # This is the CORE FIX for the drop zone overwrite bug
-            restore_shelf_to_storage_location(shelf_id, task_id=task_id)
-            app.logger.info(f"[TASK COMPLETION] RETURN_SHELF task {task_id}: Restored shelf {shelf_id} to storage location")
-            upd["$set"]["completion_action"] = "RESTORED_TO_STORAGE"
-            
+            """
+            RETURN_SHELF: Restore shelf from drop zone back to STORAGE location.
+            """
+            try:
+                from .shelf_location_service import (
+                    restore_shelf_to_storage_location,
+                    get_shelf_location_info
+                )
+                
+                success = restore_shelf_to_storage_location(shelf_id, task_id=task_id)
+                
+                if success:
+                    location_info = get_shelf_location_info(shelf_id)
+                    app.logger.info(
+                        f"[TASK COMPLETION] RETURN_SHELF task {task_id}: "
+                        f"Restored shelf {shelf_id} to storage location "
+                        f"({location_info.get('storage_x')}, {location_info.get('storage_y')})"
+                    )
+                    upd["$set"]["completion_action"] = "RESTORED_TO_STORAGE"
+                    upd["$set"]["restoration_confirmed"] = True
+                else:
+                    app.logger.warning(
+                        f"[TASK COMPLETION] RETURN_SHELF task {task_id}: "
+                        f"Shelf restoration returned False for {shelf_id}"
+                    )
+                    upd["$set"]["completion_action"] = "RESTORATION_FAILED"
+                    upd["$set"]["restoration_confirmed"] = False
+                    
+            except Exception as e:
+                app.logger.error(
+                    f"[TASK COMPLETION] RETURN_SHELF task {task_id}: "
+                    f"Failed to restore shelf {shelf_id}: {str(e)}",
+                    exc_info=True
+                )
+                upd["$set"]["completion_action"] = "RESTORATION_ERROR"
+                upd["$set"]["restoration_confirmed"] = False
+                upd["$set"]["restoration_error"] = str(e)
+        
         elif task_type == "PICKUP_AND_DELIVER" and shelf_id:
-            # Shelf stays at drop zone (current location)
-            # Mark it as delivered (at drop zone)
-            location_info = get_shelf_location_info(shelf_id)
-            if location_info:
+            """
+            PICKUP_AND_DELIVER: Shelf stays at drop zone.
+            Update shelf current location to the drop zone coordinates.
+            """
+            try:
+                from .shelf_location_service import update_shelf_current_location
+                
+                # Use drop coordinates from task (captured at assignment time)
+                drop_x = current_task.get("drop_x", 0.0)
+                drop_y = current_task.get("drop_y", 0.0)
+                drop_yaw = current_task.get("drop_yaw", 0.0)
+                
                 update_shelf_current_location(
                     shelf_id,
-                    location_info["current_x"],
-                    location_info["current_y"],
-                    location_info["current_yaw"],
+                    drop_x,
+                    drop_y,
+                    drop_yaw,
                     location_status="DELIVERED_AT_DROP_ZONE",
                     task_id=task_id
                 )
-            upd["$set"]["completion_action"] = "DELIVERED_TO_DROP_ZONE"
-            app.logger.info(f"[TASK COMPLETION] PICKUP_AND_DELIVER task {task_id}: Shelf {shelf_id} delivered to drop zone")
-            
-        elif task_type == "MOVE_SHELF" and shelf_id:
-            # Shelf stays at target location
-            location_info = get_shelf_location_info(shelf_id)
-            if location_info:
-                update_shelf_current_location(
-                    shelf_id,
-                    location_info["current_x"],
-                    location_info["current_y"],
-                    location_info["current_yaw"],
-                    location_status="REPOSITIONED",
-                    task_id=task_id
+                app.logger.info(
+                    f"[TASK COMPLETION] PICKUP_AND_DELIVER task {task_id}: "
+                    f"Shelf {shelf_id} delivered at drop zone ({drop_x}, {drop_y})"
                 )
-            upd["$set"]["completion_action"] = "MOVED_TO_TARGET"
-            app.logger.info(f"[TASK COMPLETION] MOVE_SHELF task {task_id}: Shelf {shelf_id} moved to target location")
-            
-        elif task_type == "REPOSITION" and shelf_id:
-            # Shelf stays at target zone
-            location_info = get_shelf_location_info(shelf_id)
-            if location_info:
-                update_shelf_current_location(
-                    shelf_id,
-                    location_info["current_x"],
-                    location_info["current_y"],
-                    location_info["current_yaw"],
-                    location_status="REPOSITIONED",
-                    task_id=task_id
+                upd["$set"]["completion_action"] = "DELIVERED_TO_DROP_ZONE"
+            except Exception as e:
+                app.logger.error(
+                    f"[TASK COMPLETION] PICKUP_AND_DELIVER task {task_id}: "
+                    f"Failed to update shelf location: {str(e)}",
+                    exc_info=True
                 )
-            upd["$set"]["completion_action"] = "REPOSITIONED_AT_ZONE"
-            app.logger.info(f"[TASK COMPLETION] REPOSITION task {task_id}: Shelf {shelf_id} repositioned at zone")
+                upd["$set"]["completion_action"] = "DELIVERY_LOCATION_ERROR"
         
-        # Mark robot as available again
+        elif task_type == "MOVE_SHELF" and shelf_id:
+            """
+            MOVE_SHELF: Shelf stays at target location (shelf's location).
+            Update shelf current location using coordinates from target_shelf_id.
+            """
+            try:
+                from .shelf_location_service import update_shelf_current_location
+                
+                target_shelf_id = current_task.get("target_shelf_id")
+                if target_shelf_id:
+                    # Get target shelf location
+                    from .shelf_service import get_shelf
+                    target_shelf = get_shelf(target_shelf_id)
+                    if target_shelf:
+                        # Move source shelf to target shelf's location
+                        target_x = target_shelf.get("current_x", 0.0)
+                        target_y = target_shelf.get("current_y", 0.0)
+                        target_yaw = target_shelf.get("current_yaw", 0.0)
+                        
+                        update_shelf_current_location(
+                            shelf_id,
+                            target_x,
+                            target_y,
+                            target_yaw,
+                            location_status="REPOSITIONED",
+                            task_id=task_id
+                        )
+                        app.logger.info(
+                            f"[TASK COMPLETION] MOVE_SHELF task {task_id}: "
+                            f"Shelf {shelf_id} moved to target shelf location "
+                            f"({target_x}, {target_y})"
+                        )
+                    else:
+                        app.logger.warning(
+                            f"[TASK COMPLETION] MOVE_SHELF task {task_id}: "
+                            f"Target shelf {target_shelf_id} not found"
+                        )
+                else:
+                    app.logger.warning(
+                        f"[TASK COMPLETION] MOVE_SHELF task {task_id}: "
+                        f"No target_shelf_id specified"
+                    )
+                upd["$set"]["completion_action"] = "MOVED_TO_TARGET"
+            except Exception as e:
+                app.logger.error(
+                    f"[TASK COMPLETION] MOVE_SHELF task {task_id}: "
+                    f"Failed to update shelf location: {str(e)}",
+                    exc_info=True
+                )
+                upd["$set"]["completion_action"] = "MOVE_LOCATION_ERROR"
+        
+        elif task_type == "REPOSITION" and shelf_id:
+            """
+            REPOSITION: Shelf stays at target zone.
+            Update shelf current location using zone coordinates from task.
+            """
+            try:
+                from .shelf_location_service import update_shelf_current_location
+                
+                # Use drop/target coordinates from task (zone location)
+                drop_x = current_task.get("drop_x", 0.0)
+                drop_y = current_task.get("drop_y", 0.0)
+                drop_yaw = current_task.get("drop_yaw", 0.0)
+                
+                update_shelf_current_location(
+                    shelf_id,
+                    drop_x,
+                    drop_y,
+                    drop_yaw,
+                    location_status="REPOSITIONED_AT_ZONE",
+                    task_id=task_id
+                )
+                app.logger.info(
+                    f"[TASK COMPLETION] REPOSITION task {task_id}: "
+                    f"Shelf {shelf_id} repositioned at zone ({drop_x}, {drop_y})"
+                )
+                upd["$set"]["completion_action"] = "REPOSITIONED_AT_ZONE"
+            except Exception as e:
+                app.logger.error(
+                    f"[TASK COMPLETION] REPOSITION task {task_id}: "
+                    f"Failed to update shelf location: {str(e)}",
+                    exc_info=True
+                )
+                upd["$set"]["completion_action"] = "REPOSITION_ERROR"
+        
+        # Release robot back to available pool
         robot_id = current_task.get("assigned_robot_id")
         if robot_id:
             try:
-                oid_robot = ObjectId(robot_id)
-                db.robots.update_one(
-                    {"_id": oid_robot},
-                    {"$set": {"available": True, "current_shelf_id": None}}
-                )
-            except Exception:
-                db.robots.update_one(
-                    {"robot_id": robot_id},
-                    {"$set": {"available": True, "current_shelf_id": None}}
-                )
+                try:
+                    oid_robot = ObjectId(robot_id)
+                    result = db.robots.update_one(
+                        {"_id": oid_robot},
+                        {"$set": {"available": True, "current_shelf_id": None}}
+                    )
+                except Exception:
+                    result = db.robots.update_one(
+                        {"robot_id": robot_id},
+                        {"$set": {"available": True, "current_shelf_id": None}}
+                    )
+                
+                if result.modified_count > 0:
+                    app.logger.info(f"[TASK COMPLETION] Released robot {robot_id}")
+            except Exception as e:
+                app.logger.error(f"[TASK COMPLETION] Failed to release robot: {str(e)}")
 
-    # Handle drop events: when robot places shelf at drop location but task not yet completed
-    if status in ("DROPPING", "DROPPED") and shelf_id:
-        # Use the task's configured drop coordinates (drop_x/drop_y)
+    # Handle drop events
+    elif status in ("DROPPING", "DROPPED") and shelf_id:
         try:
+            from .shelf_location_service import update_shelf_current_location
+            
             dx = float(current_task.get("drop_x", current_task.get("pickup_x", 0.0)))
             dy = float(current_task.get("drop_y", current_task.get("pickup_y", 0.0)))
             dyaw = float(current_task.get("drop_yaw", current_task.get("pickup_yaw", 0.0)))
+            
             update_shelf_current_location(
                 shelf_id,
                 dx,
@@ -381,56 +559,104 @@ def update_task_status(task_id: str, status: str) -> bool:
                 location_status="AT_DROP_ZONE",
                 task_id=task_id
             )
-            app.logger.info(f"[TASK DROP] Task {task_id}: Shelf {shelf_id} placed at drop zone ({dx},{dy})")
+            app.logger.info(
+                f"[TASK DROP] Task {task_id}: "
+                f"Shelf {shelf_id} placed at drop zone ({dx}, {dy})"
+            )
         except Exception as e:
-            app.logger.error(f"[TASK DROP] Failed to record drop location for shelf {shelf_id}: {e}")
+            app.logger.error(
+                f"[TASK DROP] Failed to record drop location for shelf {shelf_id}: {str(e)}",
+                exc_info=True
+            )
 
-    # When a task is returning (robot moves back), we intentionally DO NOT modify storage location
-    # Shelf remains at its 'current' location until the task reaches COMPLETED and logic there handles restoration
-
-    # On cancellation, attempt safe restore to storage for safety-critical flows
-    if status in ("CANCELLED", "ABORTED") and shelf_id:
+    # Handle cancellation/abort
+    elif status in ("CANCELLED", "ABORTED") and shelf_id:
         try:
-            restore_shelf_to_storage_location(shelf_id, task_id=task_id)
-            app.logger.info(f"[TASK CANCEL] Task {task_id}: Restored shelf {shelf_id} to storage due to cancel/abort")
+            from .shelf_location_service import restore_shelf_to_storage_location
+            
+            success = restore_shelf_to_storage_location(shelf_id, task_id=task_id)
+            if success:
+                app.logger.warning(
+                    f"[TASK CANCEL] Task {task_id}: "
+                    f"Restored shelf {shelf_id} to storage due to cancellation"
+                )
+            else:
+                app.logger.error(
+                    f"[TASK CANCEL] Task {task_id}: "
+                    f"Failed to restore shelf {shelf_id} on cancellation"
+                )
         except Exception as e:
-            app.logger.error(f"[TASK CANCEL] Failed to restore shelf on cancel: {e}")
-    
-    # Track error states
+            app.logger.error(
+                f"[TASK CANCEL] Failed to restore shelf on cancel: {str(e)}",
+                exc_info=True
+            )
+
+    # Handle error states
     if status == "ERROR":
         upd["$set"]["error_at"] = datetime.utcnow()
         
-        # On error, try to restore shelf to storage location for safety
         if shelf_id:
             try:
-                restore_shelf_to_storage_location(shelf_id, task_id=task_id)
-                app.logger.warning(f"[TASK ERROR] Task {task_id} failed - restored shelf {shelf_id} to storage for safety")
+                from .shelf_location_service import restore_shelf_to_storage_location
+                
+                success = restore_shelf_to_storage_location(shelf_id, task_id=task_id)
+                if success:
+                    app.logger.warning(
+                        f"[TASK ERROR] Task {task_id} failed - "
+                        f"restored shelf {shelf_id} to storage for safety"
+                    )
+                else:
+                    app.logger.error(
+                        f"[TASK ERROR] Task {task_id} failed and "
+                        f"shelf restoration also failed for {shelf_id}"
+                    )
             except Exception as e:
-                app.logger.error(f"[TASK ERROR] Failed to restore shelf on error: {e}")
+                app.logger.error(
+                    f"[TASK ERROR] Failed to restore shelf on error: {str(e)}",
+                    exc_info=True
+                )
         
-        # Mark robot as available again on error
+        # Release robot on error
         robot_id = current_task.get("assigned_robot_id")
         if robot_id:
             try:
-                oid_robot = ObjectId(robot_id)
-                db.robots.update_one(
-                    {"_id": oid_robot},
-                    {"$set": {"available": True, "current_shelf_id": None}}
-                )
-            except Exception:
-                db.robots.update_one(
-                    {"robot_id": robot_id},
-                    {"$set": {"available": True, "current_shelf_id": None}}
-                )
+                try:
+                    oid_robot = ObjectId(robot_id)
+                    db.robots.update_one(
+                        {"_id": oid_robot},
+                        {"$set": {"available": True, "current_shelf_id": None}}
+                    )
+                except Exception:
+                    db.robots.update_one(
+                        {"robot_id": robot_id},
+                        {"$set": {"available": True, "current_shelf_id": None}}
+                    )
+                app.logger.info(f"[TASK ERROR] Released robot {robot_id} on error")
+            except Exception as e:
+                app.logger.error(f"[TASK ERROR] Failed to release robot: {str(e)}")
 
-    result = db.tasks.update_one({"_id": oid}, upd)
-    return result.modified_count > 0
+    # Perform the update
+    try:
+        result = db.tasks.update_one({"_id": oid}, upd)
+        if result.modified_count > 0:
+            app.logger.info(
+                f"[TASK UPDATE] Task {task_id} status changed to {status}"
+            )
+            return True
+        else:
+            app.logger.warning(f"[TASK UPDATE] Task {task_id} update returned 0 modified")
+            return False
+    except Exception as e:
+        app.logger.error(
+            f"[TASK UPDATE] Failed to update task {task_id}: {str(e)}",
+            exc_info=True
+        )
+        return False
 
 
 def record_task_state_transition(task_id: str, from_state: str, to_state: str, metadata: Optional[Dict] = None) -> bool:
     """
     Record task state transitions for audit trail and analytics.
-    Helps track task lifecycle in detail.
     """
     db = get_db()
     try:
@@ -449,33 +675,72 @@ def record_task_state_transition(task_id: str, from_state: str, to_state: str, m
     try:
         db.task_transitions.insert_one(transition_doc)
     except Exception:
-        pass  # If collection doesn't exist yet, just skip
+        pass
     
     return True
+
+
+def _build_shelf_info(task: dict) -> Dict[str, Any]:
+    """
+    Helper: extract shelf storage/current info from task or shelf_location_service.
+    """
+    shelf_info = None
+    try:
+        from .shelf_location_service import get_shelf_location_info
+        shelf_info = get_shelf_location_info(task.get("shelf_id"))
+    except Exception:
+        shelf_info = None
+
+    if shelf_info:
+        return {
+            "storage": {
+                "x": float(shelf_info.get("storage_x", 0)),
+                "y": float(shelf_info.get("storage_y", 0)),
+                "yaw": float(shelf_info.get("storage_yaw", 0)),
+            },
+            "current": {
+                "x": float(shelf_info.get("current_x", 0)),
+                "y": float(shelf_info.get("current_y", 0)),
+                "yaw": float(shelf_info.get("current_yaw", 0)),
+            }
+        }
+    else:
+        # Fallback to task-stored snapshots
+        return {
+            "storage": {
+                "x": float(task.get("origin_storage_x", task.get("pickup_x", 0))),
+                "y": float(task.get("origin_storage_y", task.get("pickup_y", 0))),
+                "yaw": float(task.get("origin_storage_yaw", task.get("pickup_yaw", 0))),
+            },
+            "current": {
+                "x": float(task.get("current_robot_x", task.get("pickup_x", 0))),
+                "y": float(task.get("current_robot_y", task.get("pickup_y", 0))),
+                "yaw": float(task.get("pickup_yaw", 0)),
+            }
+        }
 
 
 # =========================================================
 # REAL-TIME TASK TRACKING FOR MAP UPDATES
 # =========================================================
+
 def update_task_with_robot_position(task_id: str, robot_x: float, robot_y: float, status: str):
     """
     Update task with robot's current position and status.
     Shelf location is FIXED and NEVER changes during task execution.
-    Only robot position is updated.
     """
     db = get_db()
     now = datetime.utcnow()
     
     try:
         oid = ObjectId(task_id)
-    except:
+    except Exception:
         return False
     
     task = db.tasks.find_one({"_id": oid})
     if not task:
         return False
     
-    # Update robot position and status
     update_doc = {
         "current_robot_x": robot_x,
         "current_robot_y": robot_y,
@@ -483,7 +748,6 @@ def update_task_with_robot_position(task_id: str, robot_x: float, robot_y: float
         "last_position_update": now,
     }
     
-    # Add to position history
     position_entry = {
         "timestamp": now,
         "robot_x": robot_x,
@@ -511,44 +775,14 @@ def get_task_map_view(task_id: str):
     
     try:
         oid = ObjectId(task_id)
-    except:
+    except Exception:
         return None
     
     task = db.tasks.find_one({"_id": oid})
     if not task:
         return None
     
-    # Try to enrich shelf info from shelf_location_service if available
-    shelf_info = None
-    try:
-        shelf_info = get_shelf_location_info(task.get("shelf_id"))
-    except Exception:
-        shelf_info = None
-
-    # Prepare shelf representation including both storage (immutable) and current (mutable)
-    if shelf_info:
-        storage = {
-            "x": float(shelf_info.get("storage_x", 0)),
-            "y": float(shelf_info.get("storage_y", 0)),
-            "yaw": float(shelf_info.get("storage_yaw", 0)),
-        }
-        current = {
-            "x": float(shelf_info.get("current_x", 0)),
-            "y": float(shelf_info.get("current_y", 0)),
-            "yaw": float(shelf_info.get("current_yaw", 0)),
-        }
-    else:
-        # Fallback to task-stored snapshots (if created)
-        storage = {
-            "x": float(task.get("origin_storage_x", task.get("pickup_x", 0))),
-            "y": float(task.get("origin_storage_y", task.get("pickup_y", 0))),
-            "yaw": float(task.get("origin_storage_yaw", task.get("pickup_yaw", 0))),
-        }
-        current = {
-            "x": float(task.get("current_robot_x", task.get("pickup_x", 0))),
-            "y": float(task.get("current_robot_y", task.get("pickup_y", 0))),
-            "yaw": float(task.get("pickup_yaw", 0)),
-        }
+    shelf_info_dict = _build_shelf_info(task)
 
     return {
         "task_id": str(task.get("_id")),
@@ -563,8 +797,8 @@ def get_task_map_view(task_id: str):
 
         "shelf": {
             "id": task.get("shelf_id"),
-            "storage": storage,
-            "current": current,
+            "storage": shelf_info_dict["storage"],
+            "current": shelf_info_dict["current"],
         },
 
         "drop_zone": {
@@ -589,19 +823,7 @@ def get_all_tasks_map_view():
 
     map_view = []
     for task in tasks:
-        # try to enrich shelf info
-        shelf_info = None
-        try:
-            shelf_info = get_shelf_location_info(task.get("shelf_id"))
-        except Exception:
-            shelf_info = None
-
-        if shelf_info:
-            storage = {"x": float(shelf_info.get("storage_x", 0)), "y": float(shelf_info.get("storage_y", 0))}
-            current = {"x": float(shelf_info.get("current_x", 0)), "y": float(shelf_info.get("current_y", 0))}
-        else:
-            storage = {"x": float(task.get("origin_storage_x", task.get("pickup_x", 0))), "y": float(task.get("origin_storage_y", task.get("pickup_y", 0)))}
-            current = {"x": float(task.get("current_robot_x", task.get("pickup_x", 0))), "y": float(task.get("current_robot_y", task.get("pickup_y", 0)))}
+        shelf_info_dict = _build_shelf_info(task)
 
         map_view.append({
             "task_id": str(task.get("_id")),
@@ -614,8 +836,8 @@ def get_all_tasks_map_view():
             },
             "shelf": {
                 "id": task.get("shelf_id"),
-                "storage": storage,
-                "current": current,
+                "storage": shelf_info_dict["storage"],
+                "current": shelf_info_dict["current"],
             },
             "drop_zone": {
                 "id": task.get("drop_zone_id", task.get("zone_id")),
@@ -631,18 +853,24 @@ def get_all_tasks_map_view():
 
 def emit_task_update_websocket(socketio, task_id: str):
     """Emit task update to WebSocket clients for live map updates."""
-    map_data = get_task_map_view(task_id)
-    if map_data:
-        socketio.emit("task_update", {
-            "task": map_data,
-            "timestamp": datetime.utcnow().isoformat(),
-        }, broadcast=True)
+    try:
+        map_data = get_task_map_view(task_id)
+        if map_data:
+            socketio.emit("task_update", {
+                "task": map_data,
+                "timestamp": datetime.utcnow().isoformat(),
+            }, broadcast=True)
+    except Exception as e:
+        app.logger.error(f"Failed to emit task update: {e}")
 
 
 def emit_all_tasks_update_websocket(socketio):
     """Emit all tasks update to WebSocket clients for live map."""
-    map_data = get_all_tasks_map_view()
-    socketio.emit("tasks_update", {
-        "tasks": map_data,
-        "timestamp": datetime.utcnow().isoformat(),
-    }, broadcast=True)
+    try:
+        map_data = get_all_tasks_map_view()
+        socketio.emit("tasks_update", {
+            "tasks": map_data,
+            "timestamp": datetime.utcnow().isoformat(),
+        }, broadcast=True)
+    except Exception as e:
+        app.logger.error(f"Failed to emit all tasks update: {e}")

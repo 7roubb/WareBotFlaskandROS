@@ -38,9 +38,9 @@ def initialize_shelf_storage_location(shelf_id: str, x: float, y: float, yaw: fl
                     "storage_x": float(x),
                     "storage_y": float(y),
                     "storage_yaw": float(yaw),
-                    "x_coord": float(x),
-                    "y_coord": float(y),
-                    "yaw": float(yaw),
+                    "current_x": float(x),
+                    "current_y": float(y),
+                    "current_yaw": float(yaw),
                     "location_status": "STORED",
                     "updated_at": datetime.utcnow()
                 }
@@ -57,9 +57,9 @@ def initialize_shelf_storage_location(shelf_id: str, x: float, y: float, yaw: fl
                         "storage_x": float(x),
                         "storage_y": float(y),
                         "storage_yaw": float(yaw),
-                        "x_coord": float(x),
-                        "y_coord": float(y),
-                        "yaw": float(yaw),
+                        "current_x": float(x),
+                        "current_y": float(y),
+                        "current_yaw": float(yaw),
                         "location_status": "STORED",
                         "updated_at": datetime.utcnow()
                     }
@@ -96,9 +96,9 @@ def update_shelf_current_location(
     db = get_db()
     
     update_doc = {
-        "x_coord": float(x),
-        "y_coord": float(y),
-        "yaw": float(yaw),
+        "current_x": float(x),
+        "current_y": float(y),
+        "current_yaw": float(yaw),
         "location_status": location_status,
         "updated_at": datetime.utcnow()
     }
@@ -163,9 +163,9 @@ def restore_shelf_to_storage_location(shelf_id: str, task_id: Optional[str] = No
         return False
     
     # Get storage location (should always exist)
-    storage_x = shelf.get("storage_x", shelf.get("x_coord", 0.0))
-    storage_y = shelf.get("storage_y", shelf.get("y_coord", 0.0))
-    storage_yaw = shelf.get("storage_yaw", shelf.get("yaw", 0.0))
+    storage_x = shelf.get("storage_x", 0.0)
+    storage_y = shelf.get("storage_y", 0.0)
+    storage_yaw = shelf.get("storage_yaw", 0.0)
     
     # Update current location to storage location
     return update_shelf_current_location(
@@ -203,12 +203,12 @@ def get_shelf_location_info(shelf_id: str) -> Optional[Dict[str, Any]]:
     
     return {
         "shelf_id": str(shelf.get("_id", shelf.get("shelf_id"))),
-        "storage_x": float(shelf.get("storage_x", shelf.get("x_coord", 0.0))),
-        "storage_y": float(shelf.get("storage_y", shelf.get("y_coord", 0.0))),
-        "storage_yaw": float(shelf.get("storage_yaw", shelf.get("yaw", 0.0))),
-        "current_x": float(shelf.get("x_coord", 0.0)),
-        "current_y": float(shelf.get("y_coord", 0.0)),
-        "current_yaw": float(shelf.get("yaw", 0.0)),
+        "storage_x": float(shelf.get("storage_x", 0.0)),
+        "storage_y": float(shelf.get("storage_y", 0.0)),
+        "storage_yaw": float(shelf.get("storage_yaw", 0.0)),
+        "current_x": float(shelf.get("current_x", 0.0)),
+        "current_y": float(shelf.get("current_y", 0.0)),
+        "current_yaw": float(shelf.get("current_yaw", 0.0)),
         "location_status": shelf.get("location_status", "STORED"),
         "last_task_id": shelf.get("last_task_id"),
         "updated_at": shelf.get("updated_at")
@@ -312,12 +312,12 @@ def capture_shelf_location_snapshot(shelf_id: str) -> Optional[Dict[str, Any]]:
     
     return {
         "shelf_id": str(shelf.get("_id", shelf.get("shelf_id"))),
-        "pickup_x": float(shelf.get("x_coord", 0.0)),
-        "pickup_y": float(shelf.get("y_coord", 0.0)),
-        "pickup_yaw": float(shelf.get("yaw", 0.0)),
-        "storage_x": float(shelf.get("storage_x", shelf.get("x_coord", 0.0))),
-        "storage_y": float(shelf.get("storage_y", shelf.get("y_coord", 0.0))),
-        "storage_yaw": float(shelf.get("storage_yaw", shelf.get("yaw", 0.0))),
+        "pickup_x": float(shelf.get("current_x", 0.0)),
+        "pickup_y": float(shelf.get("current_y", 0.0)),
+        "pickup_yaw": float(shelf.get("current_yaw", 0.0)),
+        "storage_x": float(shelf.get("storage_x", 0.0)),
+        "storage_y": float(shelf.get("storage_y", 0.0)),
+        "storage_yaw": float(shelf.get("storage_yaw", 0.0)),
         "location_status": shelf.get("location_status", "STORED"),
         "timestamp": datetime.utcnow().isoformat()
     }

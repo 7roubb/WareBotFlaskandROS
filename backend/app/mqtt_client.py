@@ -83,10 +83,11 @@ def on_message(client, userdata, msg):
                     "temperature": data.get("temperature", 0.0),
                     "x": data.get("x", 0.0),
                     "y": data.get("y", 0.0),
+                    "yaw": data.get("yaw", 0.0),  # Robot orientation in radians
                     "status": data.get("status", "IDLE"),
                 }
 
-                # Snapshot in MongoDB
+                # ✓ CRITICAL: Update BOTH telemetry AND position in MongoDB
                 update_robot_telemetry(robot_name, telemetry)
 
                 # Attempt to read the robot document to include canonical IDs in the emit
@@ -107,6 +108,7 @@ def on_message(client, userdata, msg):
                             .field("temperature", float(telemetry["temperature"]))
                             .field("x", float(telemetry["x"]))
                             .field("y", float(telemetry["y"]))
+                            .field("yaw", float(telemetry["yaw"]))  # Robot orientation
                             .field("status_code", status_to_code(telemetry["status"]))
                         )
 
@@ -118,25 +120,51 @@ def on_message(client, userdata, msg):
                     except Exception as e:
                         app.logger.error(f"[InfluxDB Write Error] {e}")
 
-                # WebSocket to frontend: include multiple id/name fields so frontend can match robustly
+                # =============================
+                # CRITICAL: WebSocket payload must include ALL identifier fields
+                # and BOTH x/y and current_x/current_y for maximum compatibility
+                # =============================
                 emit_payload = {
-                    "robot": robot_name,
+                    # === IDENTIFIERS (multiple formats for compatibility) ===
+                    "robot": robot_name,           # Original format
+                    "robot_id": robot_name,        # Always use robot_name from topic as primary ID
                     "name": robot_doc.get("name") if robot_doc else robot_name,
-                    "robot_id": robot_doc.get("robot_id") if robot_doc and robot_doc.get("robot_id") else robot_name,
                     "id": str(robot_doc.get("_id")) if robot_doc and robot_doc.get("_id") else None,
-                    **telemetry,
+                    
+                    # === POSITION DATA (BOTH formats) ===
+                    "x": float(telemetry["x"]),
+                    "y": float(telemetry["y"]),
+                    "yaw": float(telemetry["yaw"]),
+                    "current_x": float(telemetry["x"]),
+                    "current_y": float(telemetry["y"]),
+                    "current_yaw": float(telemetry["yaw"]),
+                    
+                    # === TELEMETRY ===
+                    "status": telemetry["status"],
+                    "cpu_usage": float(telemetry["cpu_usage"]),
+                    "ram_usage": float(telemetry["ram_usage"]),
+                    "battery_level": float(telemetry["battery_level"]),
+                    "temperature": float(telemetry["temperature"]),
+                    
+                    # === METADATA ===
+                    "timestamp": time.time(),
                 }
 
-                # extra debug log to help trace why frontend may not be updating
-                try:
-                    app.logger.debug(f"[MQTT -> WS] telemetry emit: {emit_payload}")
-                except Exception:
-                    pass
+                # ✓ DEBUG: Log the complete payload being emitted
+                app.logger.info(
+                    f"[MQTT->WS] Emitting telemetry for robot_id={robot_name}: "
+                    f"x={emit_payload['x']}, y={emit_payload['y']}, yaw={emit_payload['yaw']}, "
+                    f"identifiers: robot={emit_payload['robot']}, "
+                    f"robot_id={emit_payload['robot_id']}, "
+                    f"name={emit_payload['name']}, "
+                    f"id={emit_payload['id']}"
+                )
 
+                # Emit to WebSocket
                 ws_emit("telemetry", emit_payload)
 
             except Exception as e:
-                app.logger.error(f"[MQTT Telemetry Error] {e}")
+                app.logger.error(f"[MQTT Telemetry Error] {e}", exc_info=True)
 
         # =============================
         # TASK STATUS: robots/mp400/<robot>/task_status
@@ -179,8 +207,6 @@ def on_message(client, userdata, msg):
                 data = json.loads(payload)
 
                 # Avoid storing or emitting the potentially large 'array' field
-                # (it can be a big occupancy grid). Remove it before persisting
-                # and before emitting to frontend to reduce logging and memory use.
                 data_to_store = dict(data) if isinstance(data, dict) else {}
                 if "array" in data_to_store:
                     data_to_store.pop("array", None)
@@ -204,7 +230,6 @@ def on_message(client, userdata, msg):
 
         # =============================
         # SHELF LOCATION UPDATE: robot/<robot_id>/shelf/location
-        # CRITICAL: STORAGE LOCATION MUST NEVER BE OVERWRITTEN BY DROP ZONES
         # =============================
         elif topic.startswith("robot/") and topic.endswith("/shelf/location"):
             try:
@@ -213,14 +238,12 @@ def on_message(client, userdata, msg):
                 x = data.get("x")
                 y = data.get("y")
                 yaw = data.get("yaw", 0.0)
-                task_id = data.get("task_id")  # Task context for audit trail
+                task_id = data.get("task_id")
                 location_status = data.get("location_status", "IN_TRANSIT")
 
                 if shelf_id and x is not None and y is not None:
-                    # Import the shelf location service
                     from .services.shelf_location_service import update_shelf_current_location, get_shelf_location_info
                     
-                    # Update ONLY current location, NEVER storage location
                     success = update_shelf_current_location(
                         shelf_id,
                         float(x),
@@ -236,11 +259,9 @@ def on_message(client, userdata, msg):
                         app.logger.warning(f"[MQTT] Failed to update shelf {shelf_id} location")
                         return
 
-                    # Get complete location info for WebSocket with context
                     location_info = get_shelf_location_info(shelf_id)
                     
                     if location_info:
-                        # Notify frontend of shelf location change with FULL CONTEXT
                         ws_emit("shelf_location_update", {
                             "shelf_id": shelf_id,
                             "current_x": location_info["current_x"],
@@ -254,7 +275,6 @@ def on_message(client, userdata, msg):
                             "timestamp": datetime.utcnow().isoformat()
                         })
                         
-                        # Also emit to live shelves room for dashboard subscribers
                         ws_emit_to_room("shelf_update", {
                             "shelf_id": shelf_id,
                             "current_x": location_info["current_x"],
@@ -287,31 +307,30 @@ def on_message(client, userdata, msg):
                     db.robots.update_one(
                         {"robot_id": robot_id, "deleted": False},
                         {"$set": {
-                            "x": float(x),
-                            "y": float(y),
-                            "yaw": float(yaw),
+                            "current_x": float(x),
+                            "current_y": float(y),
+                            "current_yaw": float(yaw),
                             "updated_at": datetime.utcnow()
                         }}
                     )
                     app.logger.debug(f"[MQTT] Updated robot {robot_id} position: ({x}, {y})")
 
-                    # Emit real-time position update to frontend
-                    ws_emit("robot_position_update", {
+                    # Emit position update with ALL identifier formats
+                    position_payload = {
+                        "robot": robot_id,
                         "robot_id": robot_id,
+                        "id": robot_id,
                         "x": float(x),
                         "y": float(y),
                         "yaw": float(yaw),
+                        "current_x": float(x),
+                        "current_y": float(y),
+                        "current_yaw": float(yaw),
                         "timestamp": data.get("timestamp", time.time())
-                    })
+                    }
                     
-                    # Also emit to live robots room for dashboard subscribers
-                    ws_emit_to_room("robot_update", {
-                        "robot_id": robot_id,
-                        "x": float(x),
-                        "y": float(y),
-                        "yaw": float(yaw),
-                        "timestamp": data.get("timestamp", time.time())
-                    }, room="robots_room")
+                    ws_emit("robot_position_update", position_payload)
+                    ws_emit_to_room("robot_update", position_payload, room="robots_room")
 
             except Exception as e:
                 app.logger.error(f"[MQTT Robot Position Update Error] {e}")
@@ -328,11 +347,9 @@ def on_message(client, userdata, msg):
                 status = data.get("status")
 
                 if task_id and status:
-                    # Update task status in database
                     update_task_status(task_id, status)
                     app.logger.debug(f"[MQTT] Task {task_id} progressed to {status}")
 
-                    # Write to InfluxDB for time-series tracking
                     if influx_client is not None and write_api is not None:
                         try:
                             point = (
@@ -351,7 +368,6 @@ def on_message(client, userdata, msg):
                         except Exception as e:
                             app.logger.error(f"[InfluxDB Task Progress Write Error] {e}")
 
-                    # Emit real-time task progress to frontend
                     ws_emit("task_progress_update", {
                         "task_id": task_id,
                         "robot_id": robot_id,
@@ -360,7 +376,6 @@ def on_message(client, userdata, msg):
                         "timestamp": data.get("timestamp", time.time())
                     })
                     
-                    # Also emit to live tasks room for dashboard subscribers
                     ws_emit_to_room("task_update", {
                         "task_id": task_id,
                         "robot_id": robot_id,
@@ -397,11 +412,10 @@ def start_mqtt_client(app):
         return mqtt_client
 
     mqtt_client = mqtt.Client(
-    client_id="warebot_backend",
-    userdata={"app": app},
-    protocol=mqtt.MQTTv5
+        client_id="warebot_backend",
+        userdata={"app": app},
+        protocol=mqtt.MQTTv5
     )
-
 
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message

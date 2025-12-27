@@ -145,7 +145,9 @@ def create_task_route():
 
     # Resolve current coordinates from shelf/zone at publish time (not at creation)
     try:
-        coords = resolve_task_coordinates(task.get("id"))
+        # Extract task ObjectId string to resolve coordinates
+        task_oid = str(task.get("_id")) if hasattr(task.get("_id"), '__str__') else task.get("_id")
+        coords = resolve_task_coordinates(task_oid)
     except ValueError:
         # Fallback to stored coordinates if resolution fails. Prefer origin snapshots (storage/pickup)
         coords = {

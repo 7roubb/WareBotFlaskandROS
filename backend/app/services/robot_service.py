@@ -1,327 +1,274 @@
+"""
+Robot service - handles robot CRUD and telemetry updates
+"""
 from datetime import datetime
 from bson import ObjectId
-from influxdb_client import Point
-from flask import current_app
-from ..extensions import get_db, get_influx
-from .utils_service import serialize
+from typing import Optional, List, Dict, Any
+
+from ..extensions import get_db
 
 
-def create_robot(data: dict):
+def update_robot_telemetry(robot_name: str, telemetry: dict) -> bool:
+    """
+    Update robot telemetry AND position in MongoDB.
+    
+    CRITICAL: This updates BOTH telemetry metrics AND position coordinates
+    so that robots.list() API returns live position data.
+    
+    Args:
+        robot_name: The robot_id from MQTT topic
+        telemetry: Dict containing cpu_usage, ram_usage, battery_level, temperature, x, y, yaw, status
+    
+    Returns:
+        True if update successful, False otherwise
+    """
     db = get_db()
-    now = datetime.utcnow()
+    
+    update_data = {
+        "updated_at": datetime.utcnow(),
+        
+        # Telemetry metrics
+        "cpu_usage": float(telemetry.get("cpu_usage", 0)),
+        "ram_usage": float(telemetry.get("ram_usage", 0)),
+        "battery_level": float(telemetry.get("battery_level", 0)),
+        "temperature": float(telemetry.get("temperature", 0)),
+        
+        # ✓ CRITICAL: Update position in MongoDB
+        "current_x": float(telemetry.get("x", 0)),
+        "current_y": float(telemetry.get("y", 0)),
+        "current_yaw": float(telemetry.get("yaw", 0)),
+        
+        # Status
+        "status": telemetry.get("status", "IDLE"),
+    }
+    
+    # Update robot by robot_id (NOT robot_name)
+    result = db.robots.update_one(
+        {"robot_id": robot_name, "deleted": False},
+        {"$set": update_data}
+    )
+    
+    return result.modified_count > 0
 
-    robot_id = data["robot_id"].strip()
-    topic = f"robots/mp400/{robot_id}/status"
 
-    doc = {
+def list_robots() -> List[Dict[str, Any]]:
+    """
+    List all non-deleted robots with position data.
+    
+    Returns robots with BOTH x/y/yaw AND current_x/current_y/current_yaw
+    for frontend compatibility.
+    
+    Returns:
+        List of robot dictionaries
+    """
+    db = get_db()
+    robots = list(db.robots.find({"deleted": False}))
+    
+    result = []
+    for robot in robots:
+        # Convert _id to id
+        robot_dict = {
+            "id": str(robot["_id"]),
+            "name": robot.get("name"),
+            "robot_id": robot.get("robot_id"),
+            "topic": robot.get("topic"),
+            "available": robot.get("available", True),
+            "status": robot.get("status", "IDLE"),
+            "current_shelf_id": robot.get("current_shelf_id"),
+            
+            # ✓ Position fields (primary storage format)
+            "current_x": float(robot.get("current_x", 0)),
+            "current_y": float(robot.get("current_y", 0)),
+            "current_yaw": float(robot.get("current_yaw", 0)),
+            
+            # ✓ Alias for frontend compatibility (x/y/yaw)
+            "x": float(robot.get("current_x", 0)),
+            "y": float(robot.get("current_y", 0)),
+            "yaw": float(robot.get("current_yaw", 0)),
+            
+            # ✓ Telemetry data
+            "cpu_usage": float(robot.get("cpu_usage", 0)),
+            "ram_usage": float(robot.get("ram_usage", 0)),
+            "battery_level": float(robot.get("battery_level", 0)),
+            "temperature": float(robot.get("temperature", 0)),
+            
+            # Metadata
+            "created_at": robot.get("created_at"),
+            "updated_at": robot.get("updated_at"),
+        }
+        
+        result.append(robot_dict)
+    
+    return result
+
+
+def get_robot(robot_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Get single robot with position data.
+    
+    Args:
+        robot_id: Robot ID (ObjectId string or robot_id field)
+    
+    Returns:
+        Robot dictionary or None if not found
+    """
+    db = get_db()
+    
+    # Try by ObjectId first
+    try:
+        oid = ObjectId(robot_id)
+        robot = db.robots.find_one({"_id": oid, "deleted": False})
+    except:
+        # Try by robot_id field
+        robot = db.robots.find_one({"robot_id": robot_id, "deleted": False})
+    
+    if not robot:
+        return None
+    
+    return {
+        "id": str(robot["_id"]),
+        "name": robot.get("name"),
+        "robot_id": robot.get("robot_id"),
+        "topic": robot.get("topic"),
+        "available": robot.get("available", True),
+        "status": robot.get("status", "IDLE"),
+        "current_shelf_id": robot.get("current_shelf_id"),
+        
+        # Position (both formats)
+        "current_x": float(robot.get("current_x", 0)),
+        "current_y": float(robot.get("current_y", 0)),
+        "current_yaw": float(robot.get("current_yaw", 0)),
+        "x": float(robot.get("current_x", 0)),
+        "y": float(robot.get("current_y", 0)),
+        "yaw": float(robot.get("current_yaw", 0)),
+        
+        # Telemetry
+        "cpu_usage": float(robot.get("cpu_usage", 0)),
+        "ram_usage": float(robot.get("ram_usage", 0)),
+        "battery_level": float(robot.get("battery_level", 0)),
+        "temperature": float(robot.get("temperature", 0)),
+        
+        # Metadata
+        "created_at": robot.get("created_at"),
+        "updated_at": robot.get("updated_at"),
+    }
+
+
+def create_robot(data: dict) -> Dict[str, Any]:
+    """
+    Create a new robot with initial position.
+    
+    Args:
+        data: Robot creation data (name, robot_id, etc.)
+    
+    Returns:
+        Created robot dictionary
+    """
+    db = get_db()
+    
+    robot_doc = {
         "name": data["name"],
-        "robot_id": robot_id,
-        "topic": topic,
+        "robot_id": data["robot_id"],
         "available": data.get("available", True),
         "status": data.get("status", "IDLE"),
         "current_shelf_id": data.get("current_shelf_id"),
-        "cpu_usage": None,
-        "ram_usage": None,
-        "battery_level": None,
-        "temperature": None,
-        "x": None,
-        "y": None,
-        "created_at": now,
-        "updated_at": now,
+        
+        # Initialize position
+        "current_x": float(data.get("current_x", 0)),
+        "current_y": float(data.get("current_y", 0)),
+        "current_yaw": float(data.get("current_yaw", 0)),
+        
+        # Initialize telemetry
+        "cpu_usage": 0.0,
+        "ram_usage": 0.0,
+        "battery_level": 100.0,
+        "temperature": 0.0,
+        
+        # Generate topic
+        "topic": f"robots/mp400/{data['robot_id']}/status",
+        
+        # Metadata
         "deleted": False,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
     }
-
-    res = db.robots.insert_one(doc)
-    return serialize(db.robots.find_one({"_id": res.inserted_id}))
-
-
-def list_robots():
-    return [serialize(r) for r in get_db().robots.find({"deleted": False})]
-
-
-def get_robot(id: str):
-    try:
-        oid = ObjectId(id)
-    except:
-        return None
-    return serialize(get_db().robots.find_one({"_id": oid, "deleted": False}))
+    
+    result = db.robots.insert_one(robot_doc)
+    robot_doc["id"] = str(result.inserted_id)
+    robot_doc.pop("_id", None)
+    
+    # Add x/y/yaw aliases
+    robot_doc["x"] = robot_doc["current_x"]
+    robot_doc["y"] = robot_doc["current_y"]
+    robot_doc["yaw"] = robot_doc["current_yaw"]
+    
+    return robot_doc
 
 
-def update_robot(id: str, data: dict):
+def update_robot(robot_id: str, data: dict) -> Optional[Dict[str, Any]]:
+    """
+    Update robot (excluding position - use telemetry for that).
+    
+    Args:
+        robot_id: Robot ID (ObjectId string or robot_id field)
+        data: Update data
+    
+    Returns:
+        Updated robot dictionary or None if not found
+    """
     db = get_db()
+    
+    # Try by ObjectId first
     try:
-        oid = ObjectId(id)
+        oid = ObjectId(robot_id)
+        query = {"_id": oid, "deleted": False}
     except:
-        return None
-
+        query = {"robot_id": robot_id, "deleted": False}
+    
+    update_data = {"updated_at": datetime.utcnow()}
+    
+    # Only allow updating these fields via this endpoint
+    if "name" in data:
+        update_data["name"] = data["name"]
     if "robot_id" in data:
-        r = data["robot_id"].strip()
-        data["topic"] = f"robots/mp400/{r}/status"
-
-    data["updated_at"] = datetime.utcnow()
-    db.robots.update_one({"_id": oid, "deleted": False}, {"$set": data})
-    return get_robot(id)
-
-
-def soft_delete_robot(id: str):
-    try:
-        oid = ObjectId(id)
-    except:
-        return False
-
-    res = get_db().robots.update_one({"_id": oid}, {"$set": {"deleted": True}})
-    return res.modified_count > 0
-
-
-def update_robot_telemetry(robot_name: str, t: dict):
-    db = get_db()
-    now = datetime.utcnow()
-    t["updated_at"] = now
-    t["last_seen"] = now
-
-    db.robots.update_one(
-        {"robot_id": robot_name, "deleted": False},
-        {"$set": t},
-        upsert=True,
-    )
-
-    write_robot_telemetry_influx(robot_name, t)
-
-
-def update_robot_pose(robot_name: str, pose_data: dict):
-    """Update robot pose including odometry with yaw (x, y, yaw from odom)."""
-    db = get_db()
-    now = datetime.utcnow()
+        update_data["robot_id"] = data["robot_id"]
+        update_data["topic"] = f"robots/mp400/{data['robot_id']}/status"
+    if "available" in data:
+        update_data["available"] = data["available"]
+    if "status" in data:
+        update_data["status"] = data["status"]
+    if "current_shelf_id" in data:
+        update_data["current_shelf_id"] = data["current_shelf_id"]
     
-    update_doc = {
-        "x": float(pose_data.get("x", 0.0)),
-        "y": float(pose_data.get("y", 0.0)),
-        "yaw": float(pose_data.get("yaw", 0.0)),  # Odometry yaw
-        "updated_at": now,
-        "last_seen": now,
-    }
+    result = db.robots.update_one(query, {"$set": update_data})
     
-    db.robots.update_one(
-        {"robot_id": robot_name, "deleted": False},
-        {"$set": update_doc},
-        upsert=True,
-    )
+    if result.matched_count == 0:
+        return None
     
-    write_robot_pose_influx(robot_name, update_doc)
+    return get_robot(robot_id)
 
 
-def write_robot_telemetry_influx(robot_name: str, t: dict):
-    influx_client, write_api = get_influx()
-
-    point = (
-        Point("robot_telemetry")
-        .tag("robot", robot_name)
-        .field("cpu_usage", float(t["cpu_usage"]))
-        .field("ram_usage", float(t["ram_usage"]))
-        .field("battery_level", float(t["battery_level"]))
-        .field("temperature", float(t["temperature"]))
-        .field("x", float(t["x"]))
-        .field("y", float(t["y"]))
-        .field("status_code", int(status_to_code(t["status"])))
-        .time(datetime.utcnow())
-    )
-
-    write_api.write(
-        bucket=current_app.config["INFLUX_BUCKET"],
-        org=current_app.config["INFLUX_ORG"],
-        record=point,
-    )
-
-
-def write_robot_pose_influx(robot_name: str, pose_data: dict):
-    """Write robot pose (x, y, yaw) to InfluxDB time-series."""
-    influx_client, write_api = get_influx()
-
-    point = (
-        Point("robot_pose")
-        .tag("robot", robot_name)
-        .field("x", float(pose_data["x"]))
-        .field("y", float(pose_data["y"]))
-        .field("yaw", float(pose_data["yaw"]))
-        .time(datetime.utcnow())
-    )
-
-    write_api.write(
-        bucket=current_app.config["INFLUX_BUCKET"],
-        org=current_app.config["INFLUX_ORG"],
-        record=point,
-    )
-
-
-def status_to_code(status: str) -> int:
-    if status is None:
-        return -1
-    s = status.upper()
-    return {"IDLE": 0, "BUSY": 1, "CHARGING": 2, "OFFLINE": 3}.get(s, -1)
-
-
-def update_shelf_location(shelf_id: str, x: float, y: float, uncertainty: float = 0.0, observation_count: int = 1):
-    """Update shelf location in MongoDB with uncertainty tracking."""
-    db = get_db()
-    now = datetime.utcnow()
+def soft_delete_robot(robot_id: str) -> bool:
+    """
+    Soft delete a robot.
     
-    update_doc = {
-        "x": x,
-        "y": y,
-        "uncertainty": uncertainty,
-        "observation_count": observation_count,
-        "last_corrected": now,
-    }
+    Args:
+        robot_id: Robot ID (ObjectId string or robot_id field)
     
-    result = db.shelf_locations.update_one(
-        {"shelf_id": shelf_id},
-        {"$set": update_doc},
-        upsert=True,
-    )
-    
-    return result.modified_count > 0 or result.upserted_id is not None
-
-
-def apply_shelf_correction(shelf_id: str, old_x: float, old_y: float, 
-                          new_x: float, new_y: float, drift_distance: float, 
-                          action_type: str = "AUTO_CORRECTED"):
-    """Apply shelf location correction and log the change."""
-    db = get_db()
-    now = datetime.utcnow()
-    
-    # Update shelf location
-    shelf_update = {
-        "x": new_x,
-        "y": new_y,
-        "last_corrected": now,
-        "correction_history": []
-    }
-    
-    shelf_doc = db.shelf_locations.find_one({"shelf_id": shelf_id})
-    
-    # Create correction record
-    correction_record = {
-        "timestamp": now,
-        "old_x": old_x,
-        "old_y": old_y,
-        "new_x": new_x,
-        "new_y": new_y,
-        "drift_distance": drift_distance,
-        "action_type": action_type,
-    }
-    
-    # Apply correction
-    result = db.shelf_locations.update_one(
-        {"shelf_id": shelf_id},
-        {
-            "$set": shelf_update,
-            "$push": {"correction_history": correction_record}
-        },
-        upsert=True,
-    )
-    
-    # Write to InfluxDB for time-series tracking
-    write_shelf_correction_influx(shelf_id, old_x, old_y, new_x, new_y, drift_distance, action_type)
-    
-    return result.modified_count > 0 or result.upserted_id is not None
-
-
-def suggest_shelf_review(shelf_id: str, current_x: float, current_y: float, 
-                        uncertainty: float, observation_count: int):
-    """Create a shelf review suggestion for manual verification."""
-    db = get_db()
-    now = datetime.utcnow()
-    
-    suggestion = {
-        "shelf_id": shelf_id,
-        "current_x": current_x,
-        "current_y": current_y,
-        "uncertainty": uncertainty,
-        "observation_count": observation_count,
-        "created_at": now,
-        "status": "PENDING",
-        "reviewed_by": None,
-        "review_notes": None,
-    }
-    
-    result = db.shelf_review_suggestions.insert_one(suggestion)
-    return str(result.inserted_id)
-
-
-def write_shelf_correction_influx(shelf_id: str, old_x: float, old_y: float, 
-                                 new_x: float, new_y: float, drift_distance: float, 
-                                 action_type: str):
-    """Write shelf correction to InfluxDB time-series."""
-    influx_client, write_api = get_influx()
-    
-    point = (
-        Point("shelf_correction")
-        .tag("shelf_id", shelf_id)
-        .tag("action_type", action_type)
-        .field("old_x", old_x)
-        .field("old_y", old_y)
-        .field("new_x", new_x)
-        .field("new_y", new_y)
-        .field("drift_distance", drift_distance)
-        .time(datetime.utcnow())
-    )
-    
-    write_api.write(
-        bucket=current_app.config["INFLUX_BUCKET"],
-        org=current_app.config["INFLUX_ORG"],
-        record=point,
-    )
-
-
-def get_shelf_location(shelf_id: str):
-    """Retrieve shelf location with all metadata."""
-    db = get_db()
-    shelf = db.shelf_locations.find_one({"shelf_id": shelf_id})
-    return serialize(shelf) if shelf else None
-
-
-def get_shelf_correction_history(shelf_id: str, limit: int = 10):
-    """Get correction history for a specific shelf."""
-    db = get_db()
-    shelf = db.shelf_locations.find_one({"shelf_id": shelf_id})
-    
-    if not shelf or "correction_history" not in shelf:
-        return []
-    
-    # Return most recent corrections (sorted by timestamp desc)
-    return sorted(
-        shelf["correction_history"],
-        key=lambda x: x.get("timestamp", datetime.utcnow()),
-        reverse=True
-    )[:limit]
-
-
-def list_shelf_review_suggestions(status: str = "PENDING"):
-    """List pending shelf review suggestions."""
-    db = get_db()
-    suggestions = list(db.shelf_review_suggestions.find({"status": status}))
-    return [serialize(s) for s in suggestions]
-
-
-def resolve_shelf_review(suggestion_id: str, approved: bool, notes: str = ""):
-    """Resolve a shelf review suggestion."""
+    Returns:
+        True if deleted, False if not found
+    """
     db = get_db()
     
     try:
-        oid = ObjectId(suggestion_id)
+        oid = ObjectId(robot_id)
+        query = {"_id": oid}
     except:
-        return False
+        query = {"robot_id": robot_id}
     
-    update_doc = {
-        "status": "APPROVED" if approved else "REJECTED",
-        "reviewed_by": "admin",  # TODO: get from user context
-        "review_notes": notes,
-        "reviewed_at": datetime.utcnow(),
-    }
-    
-    result = db.shelf_review_suggestions.update_one(
-        {"_id": oid},
-        {"$set": update_doc}
+    result = db.robots.update_one(
+        query,
+        {"$set": {"deleted": True, "updated_at": datetime.utcnow()}}
     )
     
     return result.modified_count > 0
