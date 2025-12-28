@@ -4,7 +4,8 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
+from std_srvs.srv import SetBool
 
 from cv_bridge import CvBridge
 import cv2
@@ -64,9 +65,10 @@ class AprilTagAlignUpward(Node):
         self.bridge = CvBridge()
 
         # Declare parameters
-        self.declare_parameter('image_topic', '/image_raw')
+        self.declare_parameter('image_topic', '/usb_cam/image_raw')
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('estop_topic', '/emergency_stop_state')
+        self.declare_parameter('alignment_status_topic', '/apriltag/alignment_status')
         self.declare_parameter('show_debug_image', True)
         self.declare_parameter('lost_tag_timeout', 0.7)
         self.declare_parameter('camera_matrix_path', '')
@@ -76,6 +78,7 @@ class AprilTagAlignUpward(Node):
         img_topic = self.get_parameter('image_topic').value
         cmd_topic = self.get_parameter('cmd_vel_topic').value
         estop_topic = self.get_parameter('estop_topic').value
+        status_topic = self.get_parameter('alignment_status_topic').value
         self.show_debug = self.get_parameter('show_debug_image').value
         self.lost_tag_timeout = self.get_parameter('lost_tag_timeout').value
         cam_matrix_path = self.get_parameter('camera_matrix_path').value
@@ -117,10 +120,22 @@ class AprilTagAlignUpward(Node):
         self.min_vy = 0.02
         self.min_vx = 0.02
 
+        # Alignment control
+        self.alignment_enabled = False
+        self.alignment_complete = False
+
         # ROS interfaces
         self.img_sub = self.create_subscription(Image, img_topic, self.image_cb, 10)
         self.estop_sub = self.create_subscription(Bool, estop_topic, self.estop_cb, 10)
         self.cmd_pub = self.create_publisher(Twist, cmd_topic, 10)
+        self.status_pub = self.create_publisher(String, status_topic, 10)
+        
+        # Service to enable/disable alignment
+        self.alignment_service = self.create_service(
+            SetBool, 
+            '/apriltag/enable_alignment', 
+            self.enable_alignment_callback
+        )
 
         self.timer = self.create_timer(0.05, self.control_loop)
 
@@ -136,8 +151,35 @@ class AprilTagAlignUpward(Node):
         self.estop_active = False
 
         self.get_logger().info("=" * 50)
-        self.get_logger().info("UPWARD APRILTAG ALIGN (YAW FIXED) STARTED")
+        self.get_logger().info("UPWARD APRILTAG ALIGN NODE STARTED")
+        self.get_logger().info("Waiting for alignment enable command...")
         self.get_logger().info("=" * 50)
+
+    # ---------------------------------------------
+    def enable_alignment_callback(self, request, response):
+        """Service callback to enable/disable alignment"""
+        self.alignment_enabled = request.data
+        
+        if self.alignment_enabled:
+            self.get_logger().info("🎯 Alignment ENABLED - Starting alignment process")
+            self.alignment_complete = False
+            # Reset PIDs
+            self.pid_yaw.reset()
+            self.pid_strafe.reset()
+            self.pid_forward.reset()
+            # Reset filtered values
+            self.sx = None
+            self.sz = None
+            self.syaw = None
+        else:
+            self.get_logger().info("⏸️  Alignment DISABLED")
+            self.alignment_complete = False
+            # Stop the robot
+            self.cmd_pub.publish(Twist())
+        
+        response.success = True
+        response.message = f"Alignment {'enabled' if request.data else 'disabled'}"
+        return response
 
     # ---------------------------------------------
     def estop_cb(self, msg):
@@ -149,6 +191,9 @@ class AprilTagAlignUpward(Node):
 
     # ---------------------------------------------
     def image_cb(self, msg):
+        if not self.alignment_enabled:
+            return  # Don't process images if alignment is disabled
+            
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
         except:
@@ -197,8 +242,11 @@ class AprilTagAlignUpward(Node):
 
         if self.show_debug:
             txt = f"X:{self.x:+.3f} Z:{self.z:+.3f} Yaw:{self.yaw_deg:+.1f}"
+            status_txt = "ALIGNING" if self.alignment_enabled else "DISABLED"
             cv2.putText(frame, txt, (10,40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
+            cv2.putText(frame, status_txt, (10,80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0) if self.alignment_enabled else (0,0,255), 2)
             cv2.imshow("AprilTag-Upward", frame)
             cv2.waitKey(1)
 
@@ -206,7 +254,8 @@ class AprilTagAlignUpward(Node):
     def control_loop(self):
         twist = Twist()
 
-        if self.estop_active:
+        # Don't control if alignment is disabled or estop is active
+        if not self.alignment_enabled or self.estop_active:
             self.cmd_pub.publish(twist)
             return
 
@@ -218,6 +267,20 @@ class AprilTagAlignUpward(Node):
         z_aligned = abs(ez) <= self.TOLERANCE_Z
         yaw_aligned = abs(yaw) <= self.TOLERANCE_YAW
 
+        # Check if perfectly aligned
+        if x_aligned and z_aligned and yaw_aligned:
+            if not self.alignment_complete:
+                self.alignment_complete = True
+                self.get_logger().info("🎯 PERFECT ALIGNMENT ACHIEVED!")
+                # Publish status
+                status_msg = String()
+                status_msg.data = "ALIGNED"
+                self.status_pub.publish(status_msg)
+            # Stop the robot
+            self.cmd_pub.publish(twist)
+            return
+
+        # Continue aligning
         wz = self.pid_yaw.step(-yaw)
         vy = self.pid_strafe.step(-ex)
         vx = self.pid_forward.step(-ez)
@@ -235,9 +298,11 @@ class AprilTagAlignUpward(Node):
         twist.linear.x  = float(np.clip(vx, -0.10, 0.10))
 
         self.cmd_pub.publish(twist)
-
-        if x_aligned and z_aligned and yaw_aligned:
-            self.get_logger().info("🎯 PERFECT ALIGNMENT (YAW FIXED)")
+        
+        # Publish aligning status
+        status_msg = String()
+        status_msg.data = "ALIGNING"
+        self.status_pub.publish(status_msg)
 
 
 def main(args=None):

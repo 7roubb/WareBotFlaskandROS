@@ -5,7 +5,8 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    # -------- Launch Arguments --------
+    
+    # Arguments
     robot_id_arg = DeclareLaunchArgument(
         "robot_id",
         default_value="robot_1",
@@ -23,26 +24,20 @@ def generate_launch_description():
         default_value="1884",
         description="MQTT broker port"
     )
-
-    reference_frame_arg = DeclareLaunchArgument(
-        "reference_frame",
-        default_value="map",
-        description="TF frame used for Nav2 goals"
+    
+    esp32_port_arg = DeclareLaunchArgument(
+        "esp32_port",
+        default_value="/dev/ttyUSB0",
+        description="ESP32 serial port"
+    )
+    
+    esp32_baudrate_arg = DeclareLaunchArgument(
+        "esp32_baudrate",
+        default_value="115200",
+        description="ESP32 serial baudrate"
     )
 
-    attach_delay_arg = DeclareLaunchArgument(
-        "attach_delay",
-        default_value="2.0",
-        description="Seconds robot waits to attach the shelf"
-    )
-
-    release_delay_arg = DeclareLaunchArgument(
-        "release_delay",
-        default_value="2.0",
-        description="Seconds robot waits to release the shelf"
-    )
-
-    # -------- Task Runner Node --------
+    # Task Runner Node
     node = Node(
         package="warebot_task_runner",
         executable="task_runner",
@@ -51,21 +46,23 @@ def generate_launch_description():
             {"robot_id": LaunchConfiguration("robot_id")},
             {"mqtt_host": LaunchConfiguration("mqtt_host")},
             {"mqtt_port": LaunchConfiguration("mqtt_port")},
-            {"reference_frame": LaunchConfiguration("reference_frame")},
-            {"attach_delay": LaunchConfiguration("attach_delay")},
-            {"release_delay": LaunchConfiguration("release_delay")},
+            {"esp32_port": LaunchConfiguration("esp32_port")},
+            {"esp32_baudrate": LaunchConfiguration("esp32_baudrate")},
+            {"actuator_extend_time": 22.0},
+            {"actuator_retract_time": 22.0},
+            {"backend_enabled": True},
+            {"backend_host": "localhost"},
+            {"backend_port": 5000}
         ],
         output="screen",
-        emulate_tty=True,   # يجعل اللوجز تظهر بكامل ألوانها
+        emulate_tty=True,
     )
 
-    # -------- Final Launch Description --------
     return LaunchDescription([
         robot_id_arg,
         mqtt_host_arg,
         mqtt_port_arg,
-        reference_frame_arg,
-        attach_delay_arg,
-        release_delay_arg,
+        esp32_port_arg,
+        esp32_baudrate_arg,
         node,
     ])
