@@ -103,6 +103,11 @@ def create_task_and_assign(
     Create a task for the shelf and pick the best available robot.
     Tasks now store references (shelf_id, zone_id) and resolve coordinates dynamically.
     
+    Robot selection criteria:
+    - Status must be IDLE (not BUSY, ERROR, or OFFLINE)
+    - Must have valid position (current_x/current_y or x/y)
+    - Best robot selected based on distance + battery level heuristic
+    
     task_type options:
     - PICKUP_AND_DELIVER: Pick shelf, deliver to zone (or same location)
     - MOVE_SHELF: Move shelf from current location to target_shelf_id location
@@ -159,25 +164,40 @@ def create_task_and_assign(
                 drop_x, drop_y, drop_yaw = zx, zy, zyaw
                 drop_zone_id = target_zone_id
 
-    # Find available robots
-    robots = list(db.robots.find({"deleted": False, "available": True}))
+    # Find IDLE robots (not BUSY, ERROR, or OFFLINE)
+    # Status must be IDLE, and must have valid position (x/y)
+    robots = list(db.robots.find({"deleted": False, "status": "IDLE"}))
     if not robots:
         raise ValueError("no_available_robots")
 
-    # Choose best robot (distance + battery heuristic)
-    best = None
-    best_cost = float("inf")
+    # Filter robots with valid positions
+    valid_robots = []
     for r in robots:
         # Try current_x/current_y first (preferred), fallback to legacy x/y
         rx = r.get("current_x") if r.get("current_x") is not None else r.get("x")
         ry = r.get("current_y") if r.get("current_y") is not None else r.get("y")
-        battery = float(r.get("battery_level", 100))
         if rx is None or ry is None:
             continue
+        valid_robots.append(r)
+    
+    if not valid_robots:
+        raise ValueError("no_suitable_robot")
+
+    # Choose best robot (distance + battery heuristic)
+    best = None
+    best_cost = float("inf")
+    for r in valid_robots:
+        # Get position (current_x/current_y preferred, fallback to x/y)
+        rx = r.get("current_x") if r.get("current_x") is not None else r.get("x")
+        ry = r.get("current_y") if r.get("current_y") is not None else r.get("y")
+        battery = float(r.get("battery_level", 100))
+        
         try:
             dist = ((float(rx) - pickup_x) ** 2 + (float(ry) - pickup_y) ** 2) ** 0.5
         except Exception:
             continue
+        
+        # Cost function: distance (70%) + battery depletion (30%)
         cost = dist * 0.7 + (100.0 - battery) * 0.3
         if cost < best_cost:
             best_cost = cost
@@ -521,7 +541,7 @@ def update_task_status(task_id: str, status: str) -> bool:
                 )
                 upd["$set"]["completion_action"] = "REPOSITION_ERROR"
         
-        # Release robot back to available pool
+        # Release robot back to IDLE status
         robot_id = current_task.get("assigned_robot_id")
         if robot_id:
             try:
@@ -529,16 +549,16 @@ def update_task_status(task_id: str, status: str) -> bool:
                     oid_robot = ObjectId(robot_id)
                     result = db.robots.update_one(
                         {"_id": oid_robot},
-                        {"$set": {"available": True, "current_shelf_id": None}}
+                        {"$set": {"status": "IDLE", "current_shelf_id": None}}
                     )
                 except Exception:
                     result = db.robots.update_one(
                         {"robot_id": robot_id},
-                        {"$set": {"available": True, "current_shelf_id": None}}
+                        {"$set": {"status": "IDLE", "current_shelf_id": None}}
                     )
                 
                 if result.modified_count > 0:
-                    app.logger.info(f"[TASK COMPLETION] Released robot {robot_id}")
+                    app.logger.info(f"[TASK COMPLETION] Released robot {robot_id} to IDLE status")
             except Exception as e:
                 app.logger.error(f"[TASK COMPLETION] Failed to release robot: {str(e)}")
 
@@ -616,7 +636,7 @@ def update_task_status(task_id: str, status: str) -> bool:
                     exc_info=True
                 )
         
-        # Release robot on error
+        # Release robot on error (set status to IDLE)
         robot_id = current_task.get("assigned_robot_id")
         if robot_id:
             try:
@@ -624,14 +644,14 @@ def update_task_status(task_id: str, status: str) -> bool:
                     oid_robot = ObjectId(robot_id)
                     db.robots.update_one(
                         {"_id": oid_robot},
-                        {"$set": {"available": True, "current_shelf_id": None}}
+                        {"$set": {"status": "IDLE", "current_shelf_id": None}}
                     )
                 except Exception:
                     db.robots.update_one(
                         {"robot_id": robot_id},
-                        {"$set": {"available": True, "current_shelf_id": None}}
+                        {"$set": {"status": "IDLE", "current_shelf_id": None}}
                     )
-                app.logger.info(f"[TASK ERROR] Released robot {robot_id} on error")
+                app.logger.info(f"[TASK ERROR] Released robot {robot_id} to IDLE status on error")
             except Exception as e:
                 app.logger.error(f"[TASK ERROR] Failed to release robot: {str(e)}")
 

@@ -1,5 +1,6 @@
 """
 Robot service - handles robot CRUD and telemetry updates
+Uses STATUS field (IDLE/BUSY/ERROR/OFFLINE) instead of available.
 """
 from datetime import datetime
 from bson import ObjectId
@@ -24,6 +25,11 @@ def update_robot_telemetry(robot_name: str, telemetry: dict) -> bool:
     """
     db = get_db()
     
+    # Handle None values safely
+    x = telemetry.get("x")
+    y = telemetry.get("y")
+    yaw = telemetry.get("yaw")
+    
     update_data = {
         "updated_at": datetime.utcnow(),
         
@@ -33,10 +39,10 @@ def update_robot_telemetry(robot_name: str, telemetry: dict) -> bool:
         "battery_level": float(telemetry.get("battery_level", 0)),
         "temperature": float(telemetry.get("temperature", 0)),
         
-        # ✓ CRITICAL: Update position in MongoDB
-        "current_x": float(telemetry.get("x", 0)),
-        "current_y": float(telemetry.get("y", 0)),
-        "current_yaw": float(telemetry.get("yaw", 0)),
+        # ✓ CRITICAL: Update position in MongoDB with None safety
+        "current_x": float(x) if x is not None else 0.0,
+        "current_y": float(y) if y is not None else 0.0,
+        "current_yaw": float(yaw) if yaw is not None else 0.0,
         
         # Status
         "status": telemetry.get("status", "IDLE"),
@@ -72,8 +78,7 @@ def list_robots() -> List[Dict[str, Any]]:
             "name": robot.get("name"),
             "robot_id": robot.get("robot_id"),
             "topic": robot.get("topic"),
-            "available": robot.get("available", True),
-            "status": robot.get("status", "IDLE"),
+            "status": robot.get("status", "IDLE"),  # Primary status field
             "current_shelf_id": robot.get("current_shelf_id"),
             
             # ✓ Position fields (primary storage format)
@@ -130,7 +135,6 @@ def get_robot(robot_id: str) -> Optional[Dict[str, Any]]:
         "name": robot.get("name"),
         "robot_id": robot.get("robot_id"),
         "topic": robot.get("topic"),
-        "available": robot.get("available", True),
         "status": robot.get("status", "IDLE"),
         "current_shelf_id": robot.get("current_shelf_id"),
         
@@ -158,6 +162,8 @@ def create_robot(data: dict) -> Dict[str, Any]:
     """
     Create a new robot with initial position.
     
+    CRITICAL: Handles None values properly for position fields.
+    
     Args:
         data: Robot creation data (name, robot_id, etc.)
     
@@ -166,17 +172,21 @@ def create_robot(data: dict) -> Dict[str, Any]:
     """
     db = get_db()
     
+    # Handle None values for position fields
+    current_x = data.get("current_x")
+    current_y = data.get("current_y")
+    current_yaw = data.get("current_yaw")
+    
     robot_doc = {
         "name": data["name"],
         "robot_id": data["robot_id"],
-        "available": data.get("available", True),
-        "status": data.get("status", "IDLE"),
+        "status": data.get("status", "IDLE"),  # Use status instead of available
         "current_shelf_id": data.get("current_shelf_id"),
         
-        # Initialize position
-        "current_x": float(data.get("current_x", 0)),
-        "current_y": float(data.get("current_y", 0)),
-        "current_yaw": float(data.get("current_yaw", 0)),
+        # ✓ Initialize position with None safety
+        "current_x": float(current_x) if current_x is not None else 0.0,
+        "current_y": float(current_y) if current_y is not None else 0.0,
+        "current_yaw": float(current_yaw) if current_yaw is not None else 0.0,
         
         # Initialize telemetry
         "cpu_usage": 0.0,
@@ -230,15 +240,29 @@ def update_robot(robot_id: str, data: dict) -> Optional[Dict[str, Any]]:
     # Only allow updating these fields via this endpoint
     if "name" in data:
         update_data["name"] = data["name"]
+    
     if "robot_id" in data:
         update_data["robot_id"] = data["robot_id"]
         update_data["topic"] = f"robots/mp400/{data['robot_id']}/status"
-    if "available" in data:
-        update_data["available"] = data["available"]
+    
     if "status" in data:
         update_data["status"] = data["status"]
+    
     if "current_shelf_id" in data:
         update_data["current_shelf_id"] = data["current_shelf_id"]
+    
+    # Handle position updates with None safety
+    if "current_x" in data:
+        current_x = data["current_x"]
+        update_data["current_x"] = float(current_x) if current_x is not None else 0.0
+    
+    if "current_y" in data:
+        current_y = data["current_y"]
+        update_data["current_y"] = float(current_y) if current_y is not None else 0.0
+    
+    if "current_yaw" in data:
+        current_yaw = data["current_yaw"]
+        update_data["current_yaw"] = float(current_yaw) if current_yaw is not None else 0.0
     
     result = db.robots.update_one(query, {"$set": update_data})
     
@@ -274,6 +298,121 @@ def soft_delete_robot(robot_id: str) -> bool:
     return result.modified_count > 0
 
 
+def update_robot_position(robot_id: str, x: float, y: float, yaw: float = 0.0) -> bool:
+    """
+    Update robot position directly.
+    
+    Args:
+        robot_id: Robot ID (ObjectId string or robot_id field)
+        x: X coordinate
+        y: Y coordinate
+        yaw: Yaw angle (default 0.0)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    db = get_db()
+    
+    # Try by ObjectId first
+    try:
+        oid = ObjectId(robot_id)
+        query = {"_id": oid, "deleted": False}
+    except:
+        query = {"robot_id": robot_id, "deleted": False}
+    
+    result = db.robots.update_one(
+        query,
+        {"$set": {
+            "current_x": float(x),
+            "current_y": float(y),
+            "current_yaw": float(yaw),
+            "updated_at": datetime.utcnow()
+        }}
+    )
+    
+    return result.modified_count > 0
+
+
+def update_robot_battery(robot_id: str, battery_level: float) -> bool:
+    """
+    Update robot battery level.
+    
+    Args:
+        robot_id: Robot ID (ObjectId string or robot_id field)
+        battery_level: Battery level (0-100)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    db = get_db()
+    
+    # Try by ObjectId first
+    try:
+        oid = ObjectId(robot_id)
+        query = {"_id": oid, "deleted": False}
+    except:
+        query = {"robot_id": robot_id, "deleted": False}
+    
+    result = db.robots.update_one(
+        query,
+        {"$set": {
+            "battery_level": float(battery_level),
+            "updated_at": datetime.utcnow()
+        }}
+    )
+    
+    return result.modified_count > 0
+
+
+def set_robot_status(robot_id: str, status: str) -> bool:
+    """
+    Set robot status (IDLE/BUSY/ERROR/OFFLINE).
+    
+    Args:
+        robot_id: Robot ID (ObjectId string or robot_id field)
+        status: New status (IDLE/BUSY/ERROR/OFFLINE)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    db = get_db()
+    
+    valid_statuses = {"IDLE", "BUSY", "ERROR", "OFFLINE"}
+    if status not in valid_statuses:
+        return False
+    
+    # Try by ObjectId first
+    try:
+        oid = ObjectId(robot_id)
+        query = {"_id": oid, "deleted": False}
+    except:
+        query = {"robot_id": robot_id, "deleted": False}
+    
+    result = db.robots.update_one(
+        query,
+        {"$set": {
+            "status": status,
+            "updated_at": datetime.utcnow()
+        }}
+    )
+    
+    return result.modified_count > 0
+
+
+def get_robot_battery(robot_id: str) -> Optional[float]:
+    """
+    Get the current battery level for a robot.
+    
+    Args:
+        robot_id: Robot ID (ObjectId string or robot_id field)
+    
+    Returns:
+        Battery level or None if robot not found
+    """
+    robot = get_robot(robot_id)
+    return robot.get("battery_level") if robot else None
+
+
 def write_robot_telemetry_influx(robot_name: str, telemetry: dict) -> bool:
     """
     Write robot telemetry to InfluxDB time-series database.
@@ -295,6 +434,11 @@ def write_robot_telemetry_influx(robot_name: str, telemetry: dict) -> bool:
         if influx_client is None or write_api is None:
             return False
         
+        # Handle None values safely
+        x = telemetry.get("x")
+        y = telemetry.get("y")
+        yaw = telemetry.get("yaw")
+        
         point = (
             Point("robot_telemetry")
             .tag("robot", robot_name)
@@ -302,9 +446,9 @@ def write_robot_telemetry_influx(robot_name: str, telemetry: dict) -> bool:
             .field("ram_usage", float(telemetry.get("ram_usage", 0)))
             .field("battery_level", float(telemetry.get("battery_level", 0)))
             .field("temperature", float(telemetry.get("temperature", 0)))
-            .field("x", float(telemetry.get("x", 0)))
-            .field("y", float(telemetry.get("y", 0)))
-            .field("yaw", float(telemetry.get("yaw", 0)))
+            .field("x", float(x) if x is not None else 0.0)
+            .field("y", float(y) if y is not None else 0.0)
+            .field("yaw", float(yaw) if yaw is not None else 0.0)
         )
         
         write_api.write(

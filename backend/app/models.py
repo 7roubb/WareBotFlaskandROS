@@ -151,19 +151,35 @@ class ShelfUpdate(BaseModel):
     def strip_strings(cls, v):
         return v.strip() if isinstance(v, str) else None
 
+
 # =========================================================
 # ROBOT MODELS
 # =========================================================
 class RobotCreate(BaseModel):
+    """
+    Robot creation model.
+    
+    Uses STATUS field for robot state:
+    - IDLE: Ready for tasks (default)
+    - BUSY: Currently executing a task
+    - ERROR: Needs attention/maintenance
+    - OFFLINE: Not connected
+    
+    The 'available' field is DEPRECATED and ignored in backend logic.
+    """
     name: str
-    robot_id: str               # <-- user will type: robot1
-    available: bool = True
-    status: str = "IDLE"
+    robot_id: str
+    status: str = "IDLE"  # IDLE | BUSY | ERROR | OFFLINE
     current_shelf_id: Optional[str] = None
+    
     # Robot position tracking
     current_x: Optional[float] = None
     current_y: Optional[float] = None
     current_yaw: Optional[float] = 0.0
+    
+    # DEPRECATED: Kept for backward compatibility only, ignored in logic
+    # Use 'status' field instead: IDLE = available, BUSY = unavailable
+    available: Optional[bool] = None
 
     @validator("status")
     def validate_status(cls, v):
@@ -172,21 +188,36 @@ class RobotCreate(BaseModel):
             raise ValueError(f"status must be one of {ROBOT_STATUSES}")
         return v
 
-    @validator("name", "robot_id")   # <-- FIXED HERE (no 'topic')
+    @validator("name", "robot_id")
     def strip_text(cls, v):
         return v.strip()
 
 
 class RobotUpdate(BaseModel):
+    """
+    Robot update model.
+    
+    Uses STATUS field for robot state:
+    - IDLE: Ready for tasks
+    - BUSY: Currently executing a task
+    - ERROR: Needs attention/maintenance
+    - OFFLINE: Not connected
+    
+    The 'available' field is DEPRECATED and ignored in backend logic.
+    """
     name: Optional[str] = None
-    robot_id: Optional[str] = None   # <-- instead of topic
-    available: Optional[bool] = None
-    status: Optional[str] = None
+    robot_id: Optional[str] = None
+    status: Optional[str] = None  # IDLE | BUSY | ERROR | OFFLINE
     current_shelf_id: Optional[str] = None
+    
     # Robot position tracking
     current_x: Optional[float] = None
     current_y: Optional[float] = None
     current_yaw: Optional[float] = None
+    
+    # DEPRECATED: Kept for backward compatibility only, ignored in logic
+    # Use 'status' field instead: IDLE = available, BUSY = unavailable
+    available: Optional[bool] = None
 
     @validator("status")
     def validate_status(cls, v):
@@ -197,10 +228,15 @@ class RobotUpdate(BaseModel):
             raise ValueError(f"status must be one of {ROBOT_STATUSES}")
         return v
 
+
 # =========================================================
 # ROBOT TELEMETRY (USED WITH INFLUXDB)
 # =========================================================
 class RobotTelemetry(BaseModel):
+    """
+    Robot telemetry data for InfluxDB.
+    Includes position, battery, system metrics, and status.
+    """
     cpu_usage: float = Field(..., ge=0, le=100)
     ram_usage: float = Field(..., ge=0, le=100)
     battery_level: float = Field(..., ge=0, le=100)
@@ -208,7 +244,7 @@ class RobotTelemetry(BaseModel):
     x: float
     y: float
     yaw: Optional[float] = 0.0  # Robot orientation in radians
-    status: Optional[str] = None
+    status: Optional[str] = None  # IDLE | BUSY | ERROR | OFFLINE
 
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
@@ -247,19 +283,28 @@ class AdminLogin(BaseModel):
 # TASK MODELS
 # =========================================================
 class TaskCreate(BaseModel):
+    """
+    Task creation model.
+    
+    task_type values:
+    - PICKUP_AND_DELIVER: Pick shelf from current location, deliver to zone
+    - MOVE_SHELF: Move shelf to target_shelf_id location
+    - RETURN_SHELF: Return shelf from zone back to storage location
+    - REPOSITION: Reposition shelf to target_zone_id
+    """
     shelf_id: str
     priority: int = Field(default=1, ge=1, le=10)
     description: Optional[str] = None
     zone_id: Optional[str] = None
     task_type: str = Field(default="PICKUP_AND_DELIVER")
-    # task_type values:
-    # - PICKUP_AND_DELIVER: pick shelf from current location, deliver to zone
-    # - MOVE_SHELF: move shelf to a new target location
-    # - RETURN_SHELF: return shelf from zone back to storage
-    # - REPOSITION: reposition shelf within warehouse
-    target_shelf_id: Optional[str] = None  # for MOVE_SHELF: destination shelf/location
-    target_zone_id: Optional[str] = None   # for REPOSITION: destination zone
-    # Optional: origin/storage snapshots (populated by backend at creation time when available)
+    
+    # For MOVE_SHELF: destination shelf/location
+    target_shelf_id: Optional[str] = None
+    
+    # For REPOSITION: destination zone
+    target_zone_id: Optional[str] = None
+    
+    # Optional: origin/storage snapshots (populated by backend at creation time)
     origin_storage_x: Optional[float] = None
     origin_storage_y: Optional[float] = None
     origin_storage_yaw: Optional[float] = None
@@ -269,7 +314,16 @@ class TaskCreate(BaseModel):
 
 
 class TaskStatusEnum(str):
-    """Task status tracking with complete state machine"""
+    """
+    Task status tracking with complete state machine.
+    
+    Status flow:
+    PENDING → ASSIGNED → MOVING_TO_PICKUP → ARRIVED_AT_PICKUP → 
+    ATTACHED → MOVING_TO_DROP → ARRIVED_AT_DROP → RELEASED → 
+    MOVING_TO_REFERENCE → COMPLETED
+    
+    Error states: ERROR, CANCELLED
+    """
     PENDING = "PENDING"
     ASSIGNED = "ASSIGNED"
     MOVING_TO_PICKUP = "MOVING_TO_PICKUP"
@@ -288,6 +342,7 @@ class TaskStatusEnum(str):
 # ZONE MODELS
 # =========================================================
 class ZoneCreate(BaseModel):
+    """Zone creation model for drop-off locations."""
     zone_id: str = Field(..., min_length=1, max_length=100)
     name: Optional[str] = Field(default=None, max_length=200)
     x: float
@@ -300,6 +355,7 @@ class ZoneCreate(BaseModel):
 
 
 class ZoneUpdate(BaseModel):
+    """Zone update model."""
     name: Optional[str] = Field(default=None, max_length=200)
     x: Optional[float] = None
     y: Optional[float] = None
@@ -314,6 +370,7 @@ class ZoneUpdate(BaseModel):
 # STOCK MODELS
 # =========================================================
 class ProductTransactionCreate(BaseModel):
+    """Product stock transaction model."""
     product_id: str
     quantity: int = Field(..., gt=0)
     action: str = Field(..., pattern="^(PICK|RETURN|ADJUST)$")
@@ -321,12 +378,14 @@ class ProductTransactionCreate(BaseModel):
 
 
 class StockReturn(BaseModel):
+    """Stock return model."""
     product_id: str
     quantity: int = Field(..., gt=0)
     description: Optional[str] = None
 
 
 class StockAdjust(BaseModel):
+    """Stock adjustment model."""
     product_id: str
     new_quantity: int = Field(..., ge=0)
     reason: Optional[str] = None
@@ -336,8 +395,10 @@ class StockAdjust(BaseModel):
 # IMAGE MODELS
 # =========================================================
 class SetMainImage(BaseModel):
+    """Set main product image."""
     image_url: str
 
 
 class DeleteImage(BaseModel):
+    """Delete product image by index."""
     index: int = Field(..., ge=0)

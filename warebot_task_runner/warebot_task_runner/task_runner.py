@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced WareBot Task Runner Node with AprilTag Alignment & ESP32 Integration
+Enhanced WareBot Task Runner Node with Path Following, AprilTag Alignment & ESP32
 """
 
 import json
@@ -8,7 +8,7 @@ import math
 import time
 import threading
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 import requests
 import serial
@@ -18,7 +18,8 @@ from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
 
 from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateToPose
+from nav_msgs.msg import Path
+from nav2_msgs.action import NavigateToPose, FollowPath
 from std_msgs.msg import String, Bool
 from std_srvs.srv import SetBool
 import paho.mqtt.client as mqtt
@@ -44,7 +45,7 @@ class TaskState(Enum):
 
 
 class RobotTaskRunner(Node):
-    """Main task runner node with AprilTag alignment and ESP32 control"""
+    """Main task runner node with path following, AprilTag alignment and ESP32 control"""
 
     def __init__(self):
         super().__init__("task_runner")
@@ -59,12 +60,13 @@ class RobotTaskRunner(Node):
         self.declare_parameter("backend_host", "localhost")
         self.declare_parameter("backend_port", 5000)
         self.declare_parameter("backend_enabled", True)
+        self.declare_parameter("use_path_following", True)  # Use FollowPath vs NavigateToPose
         
         # ESP32 serial parameters
         self.declare_parameter("esp32_port", "/dev/ttyUSB0")
         self.declare_parameter("esp32_baudrate", 115200)
-        self.declare_parameter("actuator_extend_time", 22.0)  # seconds
-        self.declare_parameter("actuator_retract_time", 22.0)  # seconds
+        self.declare_parameter("actuator_extend_time", 22.0)
+        self.declare_parameter("actuator_retract_time", 22.0)
 
         self.robot_id = self.get_parameter("robot_id").value
         self.mqtt_host = self.get_parameter("mqtt_host").value
@@ -75,6 +77,7 @@ class RobotTaskRunner(Node):
         self.backend_host = self.get_parameter("backend_host").value
         self.backend_port = int(self.get_parameter("backend_port").value)
         self.backend_enabled = self.get_parameter("backend_enabled").value
+        self.use_path_following = self.get_parameter("use_path_following").value
         
         # ESP32 parameters
         self.esp32_port = self.get_parameter("esp32_port").value
@@ -83,6 +86,7 @@ class RobotTaskRunner(Node):
         self.actuator_retract_time = float(self.get_parameter("actuator_retract_time").value)
 
         self.get_logger().info(f"Task Runner initialized for {self.robot_id}")
+        self.get_logger().info(f"Path following mode: {'FollowPath' if self.use_path_following else 'NavigateToPose'}")
         if self.backend_enabled:
             self.get_logger().info(f"Backend API: {self.backend_host}:{self.backend_port}")
 
@@ -95,13 +99,21 @@ class RobotTaskRunner(Node):
         self.esp32_serial = None
         self._init_esp32_serial()
 
-        # --- Nav2 action client ---
+        # --- Nav2 action clients ---
         self._nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
-        self.get_logger().info("Waiting for Nav2 server...")
+        self._path_client = ActionClient(self, FollowPath, "follow_path")
+        
+        self.get_logger().info("Waiting for Nav2 servers...")
         if not self._nav_client.wait_for_server(timeout_sec=10.0):
-            self.get_logger().warn("Nav2 server not available yet. Continuing...")
+            self.get_logger().warn("NavigateToPose server not available yet. Continuing...")
         else:
-            self.get_logger().info("Nav2 server ready")
+            self.get_logger().info("NavigateToPose server ready")
+            
+        if self.use_path_following:
+            if not self._path_client.wait_for_server(timeout_sec=10.0):
+                self.get_logger().warn("FollowPath server not available yet. Continuing...")
+            else:
+                self.get_logger().info("FollowPath server ready")
 
         # --- AprilTag Alignment Service Client ---
         self._alignment_client = self.create_client(SetBool, '/apriltag/enable_alignment')
@@ -211,11 +223,9 @@ class RobotTaskRunner(Node):
         self.publish_status("EXTENDING_ACTUATORS")
         
         if self.send_esp32_command("EXTEND"):
-            # Wait for extension to complete
             self.get_logger().info(f"⏳ Waiting {self.actuator_extend_time}s for extension...")
             time.sleep(self.actuator_extend_time)
             
-            # Stop actuators
             self.send_esp32_command("STOP")
             self.get_logger().info("✅ Actuators extended - Shelf attached")
             return True
@@ -230,11 +240,9 @@ class RobotTaskRunner(Node):
         self.publish_status("RETRACTING_ACTUATORS")
         
         if self.send_esp32_command("RETRACT"):
-            # Wait for retraction to complete
             self.get_logger().info(f"⏳ Waiting {self.actuator_retract_time}s for retraction...")
             time.sleep(self.actuator_retract_time)
             
-            # Stop actuators
             self.send_esp32_command("STOP")
             self.get_logger().info("✅ Actuators retracted - Shelf released")
             return True
@@ -279,7 +287,6 @@ class RobotTaskRunner(Node):
         request.data = enable
         
         future = self._alignment_client.call_async(request)
-        # Don't wait for response, just send it
         self.get_logger().info(f"{'Enabling' if enable else 'Disabling'} AprilTag alignment")
         return True
 
@@ -400,10 +407,16 @@ class RobotTaskRunner(Node):
         except Exception as e:
             self.get_logger().warn(f"Failed to set reference point: {e}")
 
+        # Log task details including path info
+        path_to_pickup = task_data.get("path_to_pickup", {})
+        num_waypoints = path_to_pickup.get("num_waypoints", 0)
+        path_distance = path_to_pickup.get("distance", 0)
+        
         self.get_logger().info(
             f"📋 Task {task_data.get('task_id')} | "
             f"Pickup: ({task_data.get('pickup_x')},{task_data.get('pickup_y')}) | "
-            f"Drop: ({task_data.get('drop_x')},{task_data.get('drop_y')})"
+            f"Drop: ({task_data.get('drop_x')},{task_data.get('drop_y')}) | "
+            f"Path: {num_waypoints} waypoints, {path_distance:.2f}m"
         )
 
         self.publish_status("ASSIGNED")
@@ -421,6 +434,51 @@ class RobotTaskRunner(Node):
             self.get_logger().error(f"Invalid reference point: {e}")
 
     # ============================================================
+    # Path Creation Helper
+    # ============================================================
+
+    def _create_path_msg(self, waypoints: List[Tuple[float, float]], yaw: float = 0.0) -> Path:
+        """
+        Create a Nav2 Path message from waypoints.
+        
+        Args:
+            waypoints: List of (x, y) tuples in world coordinates
+            yaw: Final orientation at goal
+        
+        Returns:
+            Path message for Nav2
+        """
+        path = Path()
+        path.header.frame_id = "map"
+        path.header.stamp = self.get_clock().now().to_msg()
+        
+        for i, (x, y) in enumerate(waypoints):
+            pose = PoseStamped()
+            pose.header.frame_id = "map"
+            pose.header.stamp = path.header.stamp
+            pose.pose.position.x = float(x)
+            pose.pose.position.y = float(y)
+            
+            # Calculate orientation towards next waypoint (except last)
+            if i < len(waypoints) - 1:
+                next_x, next_y = waypoints[i + 1]
+                dx = next_x - x
+                dy = next_y - y
+                waypoint_yaw = math.atan2(dy, dx)
+            else:
+                # Last waypoint uses provided yaw
+                waypoint_yaw = yaw
+            
+            qz = math.sin(waypoint_yaw / 2.0)
+            qw = math.cos(waypoint_yaw / 2.0)
+            pose.pose.orientation.z = qz
+            pose.pose.orientation.w = qw
+            
+            path.poses.append(pose)
+        
+        return path
+
+    # ============================================================
     # Navigation functions
     # ============================================================
 
@@ -431,17 +489,38 @@ class RobotTaskRunner(Node):
         self.task_state = TaskState.MOVING_TO_PICKUP
         self.publish_status("MOVING_TO_PICKUP")
 
-        x = float(self.current_task.get("pickup_x", 0.0))
-        y = float(self.current_task.get("pickup_y", 0.0))
-        yaw = float(self.current_task.get("pickup_yaw", 0.0))
+        pickup_x = float(self.current_task.get("pickup_x", 0.0))
+        pickup_y = float(self.current_task.get("pickup_y", 0.0))
+        pickup_yaw = float(self.current_task.get("pickup_yaw", 0.0))
 
-        self.get_logger().info(f"➡️  Moving to pickup: ({x:.2f}, {y:.2f})")
-        goal = self._create_nav_goal(x, y, yaw)
-
-        if not self._nav_client.wait_for_server(timeout_sec=5.0):
-            self.get_logger().warn("Nav2 not ready, trying anyway...")
-        fut = self._nav_client.send_goal_async(goal)
-        fut.add_done_callback(lambda f: self._handle_nav_result(f, TaskState.ARRIVED_AT_PICKUP))
+        # Get path from task assignment
+        path_data = self.current_task.get("path_to_pickup")
+        
+        if self.use_path_following and path_data and path_data.get("waypoints"):
+            # Use FollowPath with provided waypoints
+            waypoints = path_data["waypoints"]
+            self.get_logger().info(
+                f"➡️  Following path to pickup: {len(waypoints)} waypoints, "
+                f"{path_data.get('distance', 0):.2f}m"
+            )
+            
+            # Create path message
+            path_msg = self._create_path_msg(waypoints, pickup_yaw)
+            
+            # Send to FollowPath action
+            goal = FollowPath.Goal()
+            goal.path = path_msg
+            
+            if not self._path_client.wait_for_server(timeout_sec=5.0):
+                self.get_logger().warn("FollowPath not ready, falling back to NavigateToPose...")
+                self._navigate_to_pose(pickup_x, pickup_y, pickup_yaw, TaskState.ARRIVED_AT_PICKUP)
+            else:
+                fut = self._path_client.send_goal_async(goal)
+                fut.add_done_callback(lambda f: self._handle_nav_result(f, TaskState.ARRIVED_AT_PICKUP))
+        else:
+            # Fallback to simple NavigateToPose
+            self.get_logger().info(f"➡️  Moving to pickup: ({pickup_x:.2f}, {pickup_y:.2f})")
+            self._navigate_to_pose(pickup_x, pickup_y, pickup_yaw, TaskState.ARRIVED_AT_PICKUP)
 
     def move_to_drop(self):
         if not self.current_task:
@@ -450,17 +529,38 @@ class RobotTaskRunner(Node):
         self.task_state = TaskState.MOVING_TO_DROP
         self.publish_status("MOVING_TO_DROP")
 
-        x = float(self.current_task.get("drop_x", 0.0))
-        y = float(self.current_task.get("drop_y", 0.0))
-        yaw = float(self.current_task.get("drop_yaw", 0.0))
+        drop_x = float(self.current_task.get("drop_x", 0.0))
+        drop_y = float(self.current_task.get("drop_y", 0.0))
+        drop_yaw = float(self.current_task.get("drop_yaw", 0.0))
 
-        self.get_logger().info(f"➡️  Moving to drop: ({x:.2f}, {y:.2f})")
-        goal = self._create_nav_goal(x, y, yaw)
-
-        if not self._nav_client.wait_for_server(timeout_sec=5.0):
-            self.get_logger().warn("Nav2 not ready, trying anyway...")
-        fut = self._nav_client.send_goal_async(goal)
-        fut.add_done_callback(lambda f: self._handle_nav_result(f, TaskState.ARRIVED_AT_DROP))
+        # Get path from task assignment
+        path_data = self.current_task.get("path_to_drop")
+        
+        if self.use_path_following and path_data and path_data.get("waypoints"):
+            # Use FollowPath with provided waypoints
+            waypoints = path_data["waypoints"]
+            self.get_logger().info(
+                f"➡️  Following path to drop: {len(waypoints)} waypoints, "
+                f"{path_data.get('distance', 0):.2f}m"
+            )
+            
+            # Create path message
+            path_msg = self._create_path_msg(waypoints, drop_yaw)
+            
+            # Send to FollowPath action
+            goal = FollowPath.Goal()
+            goal.path = path_msg
+            
+            if not self._path_client.wait_for_server(timeout_sec=5.0):
+                self.get_logger().warn("FollowPath not ready, falling back to NavigateToPose...")
+                self._navigate_to_pose(drop_x, drop_y, drop_yaw, TaskState.ARRIVED_AT_DROP)
+            else:
+                fut = self._path_client.send_goal_async(goal)
+                fut.add_done_callback(lambda f: self._handle_nav_result(f, TaskState.ARRIVED_AT_DROP))
+        else:
+            # Fallback to simple NavigateToPose
+            self.get_logger().info(f"➡️  Moving to drop: ({drop_x:.2f}, {drop_y:.2f})")
+            self._navigate_to_pose(drop_x, drop_y, drop_yaw, TaskState.ARRIVED_AT_DROP)
 
     def move_to_reference(self):
         if not self.reference_point:
@@ -477,12 +577,16 @@ class RobotTaskRunner(Node):
         yaw = self.reference_point["yaw"]
 
         self.get_logger().info("🏠 Returning to reference point")
-        goal = self._create_nav_goal(x, y, yaw)
+        self._navigate_to_pose(x, y, yaw, TaskState.COMPLETED)
 
+    def _navigate_to_pose(self, x: float, y: float, yaw: float, next_state: TaskState):
+        """Helper to use NavigateToPose action"""
+        goal = self._create_nav_goal(x, y, yaw)
+        
         if not self._nav_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().warn("Nav2 not ready, trying anyway...")
         fut = self._nav_client.send_goal_async(goal)
-        fut.add_done_callback(lambda f: self._handle_nav_result(f, TaskState.COMPLETED))
+        fut.add_done_callback(lambda f: self._handle_nav_result(f, next_state))
 
     # ============================================================
     # Navigation callbacks
@@ -540,11 +644,10 @@ class RobotTaskRunner(Node):
                 self.get_logger().info("🎯 Starting AprilTag alignment...")
                 
                 # Enable AprilTag alignment
-                time.sleep(1.0)  # Small delay before alignment
+                time.sleep(1.0)
                 self.task_state = TaskState.ALIGNING_TAG
                 self.publish_status("ALIGNING_TAG")
                 self.enable_apriltag_alignment(True)
-                # Alignment status callback will handle the rest
 
             elif next_state == TaskState.ARRIVED_AT_DROP:
                 self.task_state = TaskState.ARRIVED_AT_DROP

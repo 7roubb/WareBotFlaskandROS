@@ -1,9 +1,11 @@
+from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt
 from pydantic import ValidationError
+from bson import ObjectId
 
 from ..models import RobotCreate, RobotUpdate
-from ..extensions import get_influx
+from ..extensions import get_influx, get_db
 from ..services import (
     create_robot, list_robots, get_robot,
     update_robot, soft_delete_robot,
@@ -43,7 +45,8 @@ def create_robot_route():
     Create a robot using only:
     {
         "name": "Robot A",
-        "robot_id": "robot1"
+        "robot_id": "robot1",
+        "status": "IDLE"  # Optional, defaults to IDLE
     }
     Backend generates:
         topic = robots/mp400/robot1/status
@@ -104,6 +107,173 @@ def delete_robot_route(id):
     if not soft_delete_robot(id):
         return {"error": "not_found"}, 404
     return {"status": "deleted"}
+
+
+# =========================================================
+# ROBOT STATUS MANAGEMENT
+# =========================================================
+@robots_bp.route("/<robot_id>/status", methods=["PATCH"])
+def update_robot_status(robot_id: str):
+    """
+    Update robot status (IDLE, BUSY, ERROR, OFFLINE).
+    
+    Body: {"status": "IDLE"}
+    """
+    try:
+        data = request.get_json()
+        new_status = data.get("status", "").upper()
+        
+        # Validate status
+        valid_statuses = {"IDLE", "BUSY", "ERROR", "OFFLINE"}
+        if new_status not in valid_statuses:
+            return jsonify({
+                "error": f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
+            }), 400
+        
+        db = get_db()
+        
+        # Try by MongoDB _id first
+        try:
+            oid = ObjectId(robot_id)
+            result = db.robots.update_one(
+                {"_id": oid},
+                {"$set": {
+                    "status": new_status,
+                    "updated_at": datetime.utcnow()
+                }}
+            )
+        except:
+            # Try by robot_id string
+            result = db.robots.update_one(
+                {"robot_id": robot_id},
+                {"$set": {
+                    "status": new_status,
+                    "updated_at": datetime.utcnow()
+                }}
+            )
+        
+        if result.modified_count > 0:
+            current_app.logger.info(f"[ROBOT STATUS] Updated robot {robot_id} status to {new_status}")
+            return jsonify({
+                "message": f"Robot status updated to {new_status}",
+                "status": new_status
+            }), 200
+        else:
+            return jsonify({"error": "Robot not found"}), 404
+            
+    except Exception as e:
+        current_app.logger.error(f"[ROBOT STATUS] Error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@robots_bp.route("/reset-all-idle", methods=["POST"])
+@admin_required
+def reset_all_robots_to_idle():
+    """
+    Reset ALL robots to IDLE status (emergency use only).
+    Use when system gets into inconsistent state.
+    """
+    try:
+        db = get_db()
+        result = db.robots.update_many(
+            {"deleted": False},
+            {"$set": {
+                "status": "IDLE",
+                "current_shelf_id": None,
+                "updated_at": datetime.utcnow()
+            }}
+        )
+        
+        current_app.logger.warning(f"[ROBOT RESET] Reset {result.modified_count} robots to IDLE")
+        return jsonify({
+            "message": f"Reset {result.modified_count} robots to IDLE",
+            "count": result.modified_count
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"[ROBOT RESET] Error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@robots_bp.route("/<robot_id>/set-idle", methods=["POST"])
+def set_robot_idle(robot_id: str):
+    """
+    Set a specific robot to IDLE status.
+    Use when robot is stuck in BUSY/ERROR state.
+    """
+    try:
+        db = get_db()
+        
+        try:
+            oid = ObjectId(robot_id)
+            result = db.robots.update_one(
+                {"_id": oid},
+                {"$set": {
+                    "status": "IDLE",
+                    "current_shelf_id": None,
+                    "updated_at": datetime.utcnow()
+                }}
+            )
+        except:
+            result = db.robots.update_one(
+                {"robot_id": robot_id},
+                {"$set": {
+                    "status": "IDLE",
+                    "current_shelf_id": None,
+                    "updated_at": datetime.utcnow()
+                }}
+            )
+        
+        if result.modified_count > 0:
+            current_app.logger.info(f"[ROBOT RESET] Set robot {robot_id} to IDLE")
+            return jsonify({
+                "message": f"Robot {robot_id} is now IDLE",
+                "status": "IDLE"
+            }), 200
+        else:
+            return jsonify({"error": "Robot not found"}), 404
+            
+    except Exception as e:
+        current_app.logger.error(f"[ROBOT RESET] Error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@robots_bp.route("/<robot_id>/set-busy", methods=["POST"])
+def set_robot_busy(robot_id: str):
+    """Set robot to BUSY status (used by task assignment)"""
+    try:
+        db = get_db()
+        
+        try:
+            oid = ObjectId(robot_id)
+            result = db.robots.update_one(
+                {"_id": oid},
+                {"$set": {
+                    "status": "BUSY",
+                    "updated_at": datetime.utcnow()
+                }}
+            )
+        except:
+            result = db.robots.update_one(
+                {"robot_id": robot_id},
+                {"$set": {
+                    "status": "BUSY",
+                    "updated_at": datetime.utcnow()
+                }}
+            )
+        
+        if result.modified_count > 0:
+            current_app.logger.info(f"[ROBOT STATUS] Set robot {robot_id} to BUSY")
+            return jsonify({
+                "message": f"Robot {robot_id} is now BUSY",
+                "status": "BUSY"
+            }), 200
+        else:
+            return jsonify({"error": "Robot not found"}), 404
+            
+    except Exception as e:
+        current_app.logger.error(f"[ROBOT STATUS] Error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 
 # =========================================================

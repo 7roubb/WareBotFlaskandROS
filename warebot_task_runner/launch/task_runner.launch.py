@@ -31,10 +31,10 @@ def generate_launch_description():
         description="ESP32 serial port"
     )
     
-    esp32_baudrate_arg = DeclareLaunchArgument(
-        "esp32_baudrate",
-        default_value="115200",
-        description="ESP32 serial baudrate"
+    use_path_following_arg = DeclareLaunchArgument(
+        "use_path_following",
+        default_value="true",
+        description="Use FollowPath action (true) or NavigateToPose (false)"
     )
 
     # Task Runner Node
@@ -47,12 +47,13 @@ def generate_launch_description():
             {"mqtt_host": LaunchConfiguration("mqtt_host")},
             {"mqtt_port": LaunchConfiguration("mqtt_port")},
             {"esp32_port": LaunchConfiguration("esp32_port")},
-            {"esp32_baudrate": LaunchConfiguration("esp32_baudrate")},
+            {"esp32_baudrate": 115200},
             {"actuator_extend_time": 22.0},
             {"actuator_retract_time": 22.0},
             {"backend_enabled": True},
             {"backend_host": "localhost"},
-            {"backend_port": 5000}
+            {"backend_port": 5000},
+            {"use_path_following": LaunchConfiguration("use_path_following")}
         ],
         output="screen",
         emulate_tty=True,
@@ -63,6 +64,6 @@ def generate_launch_description():
         mqtt_host_arg,
         mqtt_port_arg,
         esp32_port_arg,
-        esp32_baudrate_arg,
+        use_path_following_arg,
         node,
     ])
