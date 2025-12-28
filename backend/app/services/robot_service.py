@@ -272,3 +272,52 @@ def soft_delete_robot(robot_id: str) -> bool:
     )
     
     return result.modified_count > 0
+
+
+def write_robot_telemetry_influx(robot_name: str, telemetry: dict) -> bool:
+    """
+    Write robot telemetry to InfluxDB time-series database.
+    
+    Args:
+        robot_name: The robot_id from MQTT topic
+        telemetry: Dict containing cpu_usage, ram_usage, battery_level, temperature, x, y, yaw, status
+    
+    Returns:
+        True if write successful, False otherwise
+    """
+    try:
+        from ..extensions import get_influx
+        from influxdb_client import Point
+        from flask import current_app
+        
+        influx_client, write_api = get_influx()
+        
+        if influx_client is None or write_api is None:
+            return False
+        
+        point = (
+            Point("robot_telemetry")
+            .tag("robot", robot_name)
+            .field("cpu_usage", float(telemetry.get("cpu_usage", 0)))
+            .field("ram_usage", float(telemetry.get("ram_usage", 0)))
+            .field("battery_level", float(telemetry.get("battery_level", 0)))
+            .field("temperature", float(telemetry.get("temperature", 0)))
+            .field("x", float(telemetry.get("x", 0)))
+            .field("y", float(telemetry.get("y", 0)))
+            .field("yaw", float(telemetry.get("yaw", 0)))
+        )
+        
+        write_api.write(
+            bucket=current_app.config.get("INFLUX_BUCKET", "telemetry"),
+            org=current_app.config.get("INFLUX_ORG", "warebot"),
+            record=point
+        )
+        
+        return True
+    except Exception as e:
+        try:
+            from flask import current_app
+            current_app.logger.error(f"[InfluxDB Write Error] {e}")
+        except:
+            pass
+        return False

@@ -1,0 +1,21 @@
+🎉 terminal 1 
+cd ~/jazzy_ws
+source install/setup.bash
+ros2 launch neo_mp_400-2 bringup_sim.launch.py
+
+
+🎉 terminal 2
+ros2 run topic_tools relay /lidar_1/scan_filtered /scan
+
+
+🎉 terminal 3 
+ros2 launch nav2_bringup bringup_launch.py   use_sim_time:=true   map:=/home/super/jazzy_ws/maps/my_warehouse_map.yaml
+
+🎉 terminal 4 
+ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped "{header: {frame_id: 'map'}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}, covariance: [0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06853891909122467]}}"
+
+
+🎉 terminal 5 
+cd ~/jazzy_ws
+rviz2 -d ~/jazzy_ws/rviz_configs/nav2_config.rviz --ros-args -p use_sim_time:=true
+

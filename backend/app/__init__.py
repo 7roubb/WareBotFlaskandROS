@@ -20,6 +20,54 @@ socketio = SocketIO(cors_allowed_origins="*")
 
 
 # =========================================================
+# TASK STATUS BACKGROUND UPDATER
+# =========================================================
+def start_task_status_updater(app):
+    """Background thread: sync task statuses every 0.2 seconds."""
+    from .services import update_task_status  # avoid circular import
+
+    def updater():
+        with app.app_context():
+            db = get_db()
+
+            while True:
+                try:
+                    # Find all active tasks (not completed or cancelled)
+                    active_tasks = db.tasks.find({
+                        "deleted": False,
+                        "status": {
+                            "$nin": ["COMPLETED", "CANCELLED", "ERROR"]
+                        }
+                    })
+
+                    for task in active_tasks:
+                        task_id = str(task["_id"])
+                        current_status = task.get("status", "PENDING")
+                        
+                        # Task status updates come from MQTT (task_status topic)
+                        # This background thread ensures we periodically check for any
+                        # stale tasks and emit their current status via WebSocket
+                        try:
+                            socketio = app.extensions.get("socketio")
+                            if socketio:
+                                socketio.emit("task_status", {
+                                    "task_id": task_id,
+                                    "status": current_status,
+                                    "timestamp": time.time()
+                                })
+                        except Exception as e:
+                            app.logger.debug(f"[Task Status Emit Error] {e}")
+
+                except Exception as e:
+                    app.logger.error(f"[Task Status Updater Error] {e}")
+
+                # Sleep for 0.2 seconds (200ms)
+                time.sleep(0.2)
+
+    Thread(target=updater, daemon=True).start()
+
+
+# =========================================================
 # ROBOT OFFLINE CHECKER
 # =========================================================
 def start_robot_offline_checker(app):
@@ -171,5 +219,8 @@ def create_app():
 
     # Start background offline robot checker
     start_robot_offline_checker(app)
+    
+    # Start background task status updater (every 0.2 seconds)
+    start_task_status_updater(app)
 
     return app
