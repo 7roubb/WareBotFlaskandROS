@@ -47,6 +47,10 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
     # Telemetry + tasks + merged map + shelf location updates
     client.subscribe("robots/mp400/+/status")
     client.subscribe("robots/mp400/+/task_status")
+    
+    # ✅ CRITICAL: Subscribe to task status from NEW task runner
+    client.subscribe("robot/+/task/status")
+    
     client.subscribe("robot/+/shelf/location")  # Real-time shelf location updates
     client.subscribe("robot/+/position/update")  # Robot position updates
     client.subscribe("robot/+/task/progress")  # Task progress tracking
@@ -167,7 +171,71 @@ def on_message(client, userdata, msg):
                 app.logger.error(f"[MQTT Telemetry Error] {e}", exc_info=True)
 
         # =============================
-        # TASK STATUS: robots/mp400/<robot>/task_status
+        # ✅ NEW TASK STATUS: robot/<robot_id>/task/status (from task runner)
+        # =============================
+        elif topic.startswith("robot/") and topic.endswith("/task/status"):
+            try:
+                data = json.loads(payload)
+                task_id = data.get("task_id")
+                status = data.get("status")
+                robot_id = topic.split("/")[1]
+
+                app.logger.info(
+                    f"[MQTT TASK STATUS] Received from robot/{robot_id}: "
+                    f"task_id={task_id}, status={status}"
+                )
+
+                if task_id and status:
+                    # ✅ Update task status in database
+                    success = update_task_status(task_id, status)
+                    
+                    if success:
+                        app.logger.info(
+                            f"✅ [TASK UPDATE] Task {task_id} updated to {status}"
+                        )
+                    else:
+                        app.logger.warn(
+                            f"⚠️  [TASK UPDATE] Failed to update task {task_id} to {status}"
+                        )
+
+                    # Log to InfluxDB if configured
+                    if influx_client is not None and write_api is not None:
+                        try:
+                            point = (
+                                Point("robot_task")
+                                .tag("robot", robot_id)
+                                .tag("status", status)
+                                .field("task_id", str(task_id))
+                                .field("success", 1 if success else 0)
+                            )
+                            write_api.write(
+                                bucket=current_app.config["INFLUX_BUCKET"],
+                                org=current_app.config["INFLUX_ORG"],
+                                record=point
+                            )
+                        except Exception as e:
+                            app.logger.error(f"[InfluxDB Task Write Error] {e}")
+
+                    # Emit to WebSocket
+                    ws_emit("task_status", {
+                        "task_id": task_id,
+                        "robot_id": robot_id,
+                        "status": status,
+                        "timestamp": data.get("timestamp", time.time())
+                    })
+                    
+                    ws_emit_to_room("task_update", {
+                        "task_id": task_id,
+                        "robot_id": robot_id,
+                        "status": status,
+                        "timestamp": data.get("timestamp", time.time())
+                    }, room="tasks_room")
+
+            except Exception as e:
+                app.logger.error(f"[MQTT Task Status Error] {e}", exc_info=True)
+
+        # =============================
+        # LEGACY TASK STATUS: robots/mp400/<robot>/task_status
         # =============================
         elif topic.startswith("robots/mp400/") and topic.endswith("/task_status"):
             try:
