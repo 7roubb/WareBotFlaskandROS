@@ -1,0 +1,30 @@
+# MP-400 Footprint Configurations
+# ================================
+
+# Original footprint - 0.30m x 0.30m (60cm x 60cm)
+original_footprint: "[[0.30, 0.30], [-0.30, 0.30], [-0.30, -0.30], [0.30, -0.30]]"
+
+# Extended footprint - 1.00m x 1.00m (100cm x 100cm)
+extended_footprint: "[[0.50, 0.50], [-0.50, 0.50], [-0.50, -0.50], [0.50, -0.50]]"
+
+# Footprint descriptions
+footprints:
+  original:
+    description: "Original MP-400 footprint (60cm x 60cm)"
+    width: 0.60
+    height: 0.60
+    points:
+      - [0.30, 0.30]
+      - [-0.30, 0.30]
+      - [-0.30, -0.30]
+      - [0.30, -0.30]
+    
+  extended:
+    description: "Extended footprint (100cm x 100cm)"
+    width: 1.00
+    height: 1.00
+    points:
+      - [0.50, 0.50]
+      - [-0.50, 0.50]
+      - [-0.50, -0.50]
+      - [0.50, -0.50]
