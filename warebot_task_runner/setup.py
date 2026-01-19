@@ -1,12 +1,12 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 import os
 
 package_name = 'warebot_task_runner'
 
 setup(
-    name=package_name,
+    name='warebot_task_runner',  # ✅ Changed from 'warebot-task-runner'
     version='0.2.0',
-    packages=[package_name],
+    packages=find_packages(exclude=['test']),
     data_files=[
         # Package metadata
         ('share/ament_index/resource_index/packages',
@@ -23,10 +23,7 @@ setup(
         # Configuration and calibration files
         ('share/' + package_name + '/config',
             [
-                'config/camera_matrix.npy',
-                'config/dist_coeffs.npy',
-                'config/rvecs.npy',
-                'config/tvecs.npy',
+                'config/calibration.npy',
                 'config/task_runner.yaml',
                 'config/locations.yaml',
             ]),
@@ -37,6 +34,7 @@ setup(
         'opencv-python>=4.5.0',
         'numpy>=1.19.0',
         'pupil-apriltags>=1.0.0',
+        'pyserial>=3.5',
     ],
     zip_safe=True,
     maintainer='super',
@@ -46,8 +44,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'task_runner_integrated = warebot_task_runner.task_runner_integrated:main',
-            'task_runner = warebot_task_runner.task_runner:main',
+            'task_runner = warebot_task_runner.main:main',
         ],
     },
 )

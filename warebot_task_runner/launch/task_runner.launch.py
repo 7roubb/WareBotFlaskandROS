@@ -8,22 +8,13 @@ import os
 
 def generate_launch_description():
     """
-    COMBINED Launch File: USB Camera + Integrated Task Runner
+    COMBINED Launch File: USB Camera + Integrated Task Runner + Linear Actuators + Footprint Switcher
     
-    This single launch file starts EVERYTHING:
-    - USB Camera Node
-    - Task Runner with Integrated AprilTag Alignment
-    
-    Usage:
-    ros2 launch warebot_task_runner task_runner.launch.py
-    
-    That's it! Everything runs in one command.
+    MODIFIED: ONLY calibration_file_path parameter (no separate matrix/coeffs files)
     """
     
-    # Get package share directories
+    # Get package share directory
     warebot_pkg_share = get_package_share_directory('warebot_task_runner')
-    apriltag_pkg_share = get_package_share_directory('mp400_apriltag_align')
-    apriltag_config_dir = os.path.join(apriltag_pkg_share, 'config')
     
     # ====== LAUNCH ARGUMENTS ======
     
@@ -102,9 +93,38 @@ def generate_launch_description():
         description="Time in seconds to hold alignment before proceeding"
     )
     
+    # ========================================================================
+    # MODIFIED: ONLY calibration_file_path parameter (no separate matrix/coeffs)
+    # ========================================================================
+    calibration_file_path_arg = DeclareLaunchArgument(
+        "calibration_file_path",
+        default_value=os.path.join(warebot_pkg_share, "config", "calibration.npy"),
+        description="Full path to calibration.npy file"
+    )
+    
+    # LINEAR ACTUATOR PARAMETERS
+    actuator_port_arg = DeclareLaunchArgument(
+        "actuator_port",
+        default_value="/dev/ttyUSB1",
+        description="Serial port for linear actuator controller"
+    )
+    
+    actuator_baudrate_arg = DeclareLaunchArgument(
+        "actuator_baudrate",
+        default_value="115200",
+        description="Baudrate for actuator serial communication"
+    )
+    
+    # FOOTPRINT SWITCHING PARAMETER
+    footprint_service_arg = DeclareLaunchArgument(
+        "footprint_service",
+        default_value="/switch_footprint",
+        description="Service name for footprint switching"
+    )
+    
     # ====== NODES ======
     
-    # ✅ 1. USB CAMERA NODE
+    # USB CAMERA NODE
     usb_cam_node = Node(
         package='usb_cam',
         executable='usb_cam_node_exe',
@@ -114,16 +134,16 @@ def generate_launch_description():
             {"video_device": LaunchConfiguration('video_device')},
             {"image_width": 640},
             {"image_height": 480},
-            {"pixel_format": "mjpeg2rgb"},
+            {"pixel_format": "yuyv"},
             {"io_method": "mmap"},
             {"camera_frame_id": "camera_link"},
             {"framerate": 30.0},
-            {"brightness": -1},  # Auto
-            {"contrast": -1},    # Auto
-            {"saturation": -1},  # Auto
-            {"sharpness": -1},   # Auto
-            {"focus_absolute": -1},  # Auto focus
-            {"auto_exposure": 1},    # Auto exposure
+            {"brightness": -1},
+            {"contrast": -1},
+            {"saturation": -1},
+            {"sharpness": -1},
+            {"focus_absolute": -1},
+            {"auto_exposure": 1},
             {"exposure_absolute": 100},
         ],
         remappings=[
@@ -133,8 +153,7 @@ def generate_launch_description():
         emulate_tty=True,
     )
     
-    # ✅ 2. INTEGRATED TASK RUNNER NODE
-    # This node has AprilTag alignment built-in
+    # INTEGRATED TASK RUNNER NODE
     task_runner_node = Node(
         package="warebot_task_runner",
         executable="task_runner",
@@ -156,9 +175,17 @@ def generate_launch_description():
             {"alignment_hold_time": LaunchConfiguration("alignment_hold_time")},
             {"lost_tag_timeout": 0.7},
             
-            # Calibration file paths
-            {"camera_matrix_path": os.path.join(apriltag_config_dir, "camera_matrix.npy")},
-            {"dist_coeffs_path": os.path.join(apriltag_config_dir, "dist_coeffs.npy")},
+            # ========================================================================
+            # MODIFIED: ONLY calibration_file_path (no separate matrix/coeffs)
+            # ========================================================================
+            {"calibration_file_path": LaunchConfiguration("calibration_file_path")},
+            
+            # LINEAR ACTUATOR PARAMETERS
+            {"actuator_port": LaunchConfiguration("actuator_port")},
+            {"actuator_baudrate": LaunchConfiguration("actuator_baudrate")},
+            
+            # FOOTPRINT SWITCHING PARAMETER
+            {"footprint_service": LaunchConfiguration("footprint_service")},
         ],
         output="screen",
         emulate_tty=True,
@@ -179,8 +206,12 @@ def generate_launch_description():
         estop_topic_arg,
         show_debug_arg,
         alignment_hold_time_arg,
+        calibration_file_path_arg,  # NEW: Only calibration_file_path
+        actuator_port_arg,
+        actuator_baudrate_arg,
+        footprint_service_arg,
         
-        # Nodes - BOTH STARTED TOGETHER
+        # Nodes
         usb_cam_node,
         task_runner_node,
     ])
