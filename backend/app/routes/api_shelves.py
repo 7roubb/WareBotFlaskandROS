@@ -49,7 +49,7 @@ def emit_shelf_update(shelf_data):
         if socketio and shelf_data:
             socketio.emit("shelf_update", {
                 "id": str(shelf_data.get("_id")),
-                "warehouse_id": shelf_data.get("warehouse_id"),
+                "name": shelf_data.get("name"),
                 "current_x": shelf_data.get("current_x"),
                 "current_y": shelf_data.get("current_y"),
                 "current_yaw": shelf_data.get("current_yaw"),
@@ -118,7 +118,7 @@ def get_shelf_route(id):
 @shelves_bp.route("/<id>", methods=["PUT"])
 @admin_required
 def update_shelf_route(id):
-    """Update shelf metadata (warehouse_id, level, available, status)
+    """Update shelf metadata (name, level, available, status)
     
     NOTE: For location updates, use the dedicated /location endpoint
     NOTE: For storage location updates, use the dedicated /storage endpoint (admin only)

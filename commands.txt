@@ -21,7 +21,7 @@ ros2 launch warebot_map_merger map_merger.launch.py use_sim_time:=true
 
 db.shelves.createIndex(
   {
-    warehouse_id: 1,
+    name: 1,
     storage_x: 1,
     storage_y: 1,
     storage_yaw: 1

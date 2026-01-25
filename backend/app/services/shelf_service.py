@@ -23,7 +23,7 @@ STORAGE_COLLISION_RADIUS = 0.5  # meters
 
 def shelf_exists_within_radius(
     db,
-    warehouse_id,
+    name,
     x: float,
     y: float,
     radius: float = STORAGE_COLLISION_RADIUS,
@@ -33,7 +33,7 @@ def shelf_exists_within_radius(
     Returns a shelf if any shelf exists within a radius from (x,y)
     Excludes the shelf with exclude_id if provided (useful for updates)
     """
-    query = {"warehouse_id": warehouse_id, "deleted": False}
+    query = {"name": name, "deleted": False}
     if exclude_id:
         query["_id"] = {"$ne": exclude_id}
 
@@ -84,7 +84,7 @@ def create_shelf(data: dict):
     # exclude_id=None because this is a new shelf (no ID yet)
     existing = shelf_exists_within_radius(
         db=db,
-        warehouse_id=data["warehouse_id"],
+        name=data["name"],
         x=storage_x,
         y=storage_y,
         exclude_id=None,
@@ -106,7 +106,7 @@ def create_shelf(data: dict):
 
     # Create document
     doc = {
-        "warehouse_id": data["warehouse_id"],
+        "name": data["name"],
 
         "current_x": current_x,
         "current_y": current_y,
@@ -237,7 +237,7 @@ def set_shelf_storage_location(
     # IMPORTANT: exclude_id=oid excludes this shelf from the collision check
     existing = shelf_exists_within_radius(
         db=db,
-        warehouse_id=shelf["warehouse_id"],
+        name=shelf["name"],
         x=float(x),
         y=float(y),
         exclude_id=oid,  # Exclude self from collision detection
