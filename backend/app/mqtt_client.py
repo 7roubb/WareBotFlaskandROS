@@ -400,6 +400,45 @@ def on_message(client, userdata, msg):
                     ws_emit("robot_position_update", position_payload)
                     ws_emit_to_room("robot_update", position_payload, room="robots_room")
 
+                    # =========================================================
+                    # CRITICAL: SYNC SHELF POSITION IF CARRYING ONE
+                    # =========================================================
+                    # Check if robot is carrying a shelf
+                    robot = db.robots.find_one({"robot_id": robot_id, "deleted": False})
+                    current_shelf_id = robot.get("current_shelf_id") if robot else None
+                    
+                    if current_shelf_id:
+                        try:
+                            from .services.shelf_location_service import update_shelf_current_location, get_shelf_location_info
+                            
+                            # Update shelf position to match robot
+                            update_shelf_current_location(
+                                current_shelf_id,
+                                float(x),
+                                float(y),
+                                float(yaw),
+                                location_status="ON_ROBOT"
+                            )
+                            
+                            # Emit shelf update for frontend real-time tracking
+                            shelf_info = get_shelf_location_info(current_shelf_id)
+                            if shelf_info:
+                                update_payload = {
+                                    "shelf_id": current_shelf_id,
+                                    "current_x": shelf_info["current_x"],
+                                    "current_y": shelf_info["current_y"],
+                                    "current_yaw": shelf_info["current_yaw"],
+                                    "storage_x": shelf_info.get("storage_x"),
+                                    "storage_y": shelf_info.get("storage_y"),
+                                    "location_status": "ON_ROBOT",
+                                    "timestamp": datetime.utcnow().isoformat()
+                                }
+                                ws_emit("shelf_location_update", update_payload)
+                                ws_emit_to_room("shelf_update", update_payload, room="shelves_room")
+                                
+                        except Exception as e:
+                            app.logger.error(f"[MQTT] Failed to sync shelf position: {e}")
+
             except Exception as e:
                 app.logger.error(f"[MQTT Robot Position Update Error] {e}")
 

@@ -19,5 +19,19 @@ Launch exactly like this (no more robots / remaps needed):
 ros2 launch warebot_map_merger map_merger.launch.py use_sim_time:=true
 
 
+db.shelves.createIndex(
+  {
+    warehouse_id: 1,
+    storage_x: 1,
+    storage_y: 1,
+    storage_yaw: 1
+  },
+  {
+    unique: true,
+    partialFilterExpression: { deleted: false }
+  }
+)
+
+
 ros2 launch warebot_task_runner task_runner.launch.py robot_id:=robot_1
 

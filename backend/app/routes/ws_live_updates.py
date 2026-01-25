@@ -74,6 +74,28 @@ def register_websocket_handlers(socketio):
         })
         current_app.logger.debug("Client subscribed to system updates")
 
+    @socketio.on("subscribe_products")
+    def on_subscribe_products():
+        """Subscribe to real-time product updates"""
+        join_room("products_room")
+        emit("subscription_response", {
+            "channel": "products",
+            "status": "subscribed",
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        current_app.logger.debug("Client subscribed to product updates")
+
+    @socketio.on("subscribe_zones")
+    def on_subscribe_zones():
+        """Subscribe to real-time zone updates"""
+        join_room("zones_room")
+        emit("subscription_response", {
+            "channel": "zones",
+            "status": "subscribed",
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        current_app.logger.debug("Client subscribed to zone updates")
+
     @socketio.on("request_task_details")
     def on_request_task_details(data):
         """On-demand request for specific task details"""
@@ -163,3 +185,27 @@ def emit_system_update(socketio, system_data):
         socketio.emit("system_update", system_data, room="system_room")
     except Exception as e:
         current_app.logger.error(f"Error emitting system update: {e}")
+
+
+def emit_product_update(socketio, product_data, action="UPDATED"):
+    """Emit a product update to all subscribed clients"""
+    try:
+        socketio.emit("product_update", {
+            "action": action,
+            "product": product_data,
+            "timestamp": datetime.utcnow().isoformat()
+        }, room="products_room")
+    except Exception as e:
+        current_app.logger.error(f"Error emitting product update: {e}")
+
+
+def emit_zone_update(socketio, zone_data, action="UPDATED"):
+    """Emit a zone update to all subscribed clients"""
+    try:
+        socketio.emit("zone_update", {
+            "action": action,
+            "zone": zone_data,
+            "timestamp": datetime.utcnow().isoformat()
+        }, room="zones_room")
+    except Exception as e:
+        current_app.logger.error(f"Error emitting zone update: {e}")

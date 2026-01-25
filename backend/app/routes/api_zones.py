@@ -28,6 +28,20 @@ def handle_validation_error(err: ValidationError):
     return jsonify({"error": "validation_error", "details": err.errors()}), 400
 
 
+def _emit_zone_update(data, action):
+    """Helper to emit WebSocket event safely"""
+    try:
+        if "socketio" in current_app.extensions:
+            socketio = current_app.extensions["socketio"]
+            from .ws_live_updates import emit_zone_update
+            if data:
+                from ..services.utils_service import serialize
+                serialized = serialize(data) if isinstance(data, dict) else data
+                emit_zone_update(socketio, serialized, action)
+    except Exception as e:
+        current_app.logger.error(f"Failed to emit zone update: {e}")
+
+
 @zones_bp.route("", methods=["POST"])
 @admin_required
 def create_zone_route():
@@ -58,7 +72,11 @@ def create_zone_route():
     doc["id"] = str(doc.get("_id"))
     # remove the raw ObjectId so jsonify won't fail
     if "_id" in doc:
-        del doc["_id"]
+        _id = doc.pop("_id")
+    
+    # Emit WebSocket Event
+    _emit_zone_update(doc, "CREATED")
+    
     return jsonify(doc), 201
 
 
@@ -95,6 +113,52 @@ def get_zone_route(id):
     return jsonify(zone)
 
 
+@zones_bp.route("/<id>", methods=["PUT"])
+@admin_required
+def update_zone_route(id):
+    try:
+        data = ZoneUpdate(**request.json).dict(exclude_none=True)
+    except ValidationError as e:
+        return handle_validation_error(e)
+
+    db = get_db()
+    
+    # Find and update the zone
+    try:
+        oid = ObjectId(id)
+        result = db.zones.update_one(
+            {"_id": oid, "deleted": False},
+            {"$set": data}
+        )
+    except Exception:
+        result = db.zones.update_one(
+            {"zone_id": id, "deleted": False},
+            {"$set": data}
+        )
+
+    if result.matched_count == 0:
+        return {"error": "not_found"}, 404
+
+    # Fetch updated zone
+    try:
+        oid = ObjectId(id)
+        zone = db.zones.find_one({"_id": oid, "deleted": False})
+    except Exception:
+        zone = db.zones.find_one({"zone_id": id, "deleted": False})
+
+    if zone:
+        zone["id"] = str(zone.get("_id"))
+        if "_id" in zone:
+            _id = zone.pop("_id")
+        
+        # Emit WebSocket Event
+        _emit_zone_update(zone, "UPDATED")
+        
+        return jsonify(zone), 200
+    
+    return {"error": "update_failed"}, 500
+
+
 @zones_bp.route("/<id>", methods=["DELETE"]) 
 @admin_required
 def delete_zone_route(id):
@@ -109,4 +173,7 @@ def delete_zone_route(id):
     if res.deleted_count == 0:
         return {"error": "not_found"}, 404
 
+    # Emit WebSocket Event
+    _emit_zone_update({"_id": id}, "DELETED")
+    
     return {"result": "deleted"}, 200

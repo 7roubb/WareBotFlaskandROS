@@ -368,6 +368,28 @@ def update_task_status(task_id: str, status: str) -> bool:
     }}
     
     # =========================================================
+    # CRITICAL: Handle robot-shelf attachment
+    # =========================================================
+    if status == "ATTACHED" and shelf_id:
+        robot_id = current_task.get("assigned_robot_id")
+        if robot_id:
+            try:
+                try:
+                    oid_robot = ObjectId(robot_id)
+                    db.robots.update_one(
+                        {"_id": oid_robot},
+                        {"$set": {"current_shelf_id": shelf_id}}
+                    )
+                except Exception:
+                    db.robots.update_one(
+                        {"robot_id": robot_id},
+                        {"$set": {"current_shelf_id": shelf_id}}
+                    )
+                app.logger.info(f"[TASK UPDATE] Linked shelf {shelf_id} to robot {robot_id} (ATTACHED)")
+            except Exception as e:
+                app.logger.error(f"[TASK UPDATE] Failed to link shelf to robot: {str(e)}")
+
+    # =========================================================
     # CRITICAL: Handle completion-specific logic
     # =========================================================
     if status == "COMPLETED":
@@ -426,26 +448,42 @@ def update_task_status(task_id: str, status: str) -> bool:
             """
             PICKUP_AND_DELIVER: Shelf stays at drop zone.
             Update shelf current location to the drop zone coordinates.
+            CRITICAL: Use robot's ACTUAL position if available to prevent snapping.
             """
             try:
                 from .shelf_location_service import update_shelf_current_location
                 
-                # Use drop coordinates from task (captured at assignment time)
-                drop_x = current_task.get("drop_x", 0.0)
-                drop_y = current_task.get("drop_y", 0.0)
-                drop_yaw = current_task.get("drop_yaw", 0.0)
+                # Default to theoretical drop coordinates
+                final_x = float(current_task.get("drop_x", 0.0))
+                final_y = float(current_task.get("drop_y", 0.0))
+                final_yaw = float(current_task.get("drop_yaw", 0.0))
                 
+                # Try to get robot's actual position
+                robot_id = current_task.get("assigned_robot_id")
+                if robot_id:
+                    try:
+                        oid_robot = ObjectId(robot_id)
+                        robot = db.robots.find_one({"_id": oid_robot})
+                    except Exception:
+                        robot = db.robots.find_one({"robot_id": robot_id})
+                    
+                    if robot and robot.get("current_x") is not None:
+                        final_x = float(robot.get("current_x"))
+                        final_y = float(robot.get("current_y"))
+                        final_yaw = float(robot.get("current_yaw", 0.0))
+                        app.logger.info(f"[TASK COMPLETION] Using robot position for shelf drop: ({final_x}, {final_y})")
+
                 update_shelf_current_location(
                     shelf_id,
-                    drop_x,
-                    drop_y,
-                    drop_yaw,
+                    final_x,
+                    final_y,
+                    final_yaw,
                     location_status="DELIVERED_AT_DROP_ZONE",
                     task_id=task_id
                 )
                 app.logger.info(
                     f"[TASK COMPLETION] PICKUP_AND_DELIVER task {task_id}: "
-                    f"Shelf {shelf_id} delivered at drop zone ({drop_x}, {drop_y})"
+                    f"Shelf {shelf_id} delivered at drop zone ({final_x}, {final_y})"
                 )
                 upd["$set"]["completion_action"] = "DELIVERED_TO_DROP_ZONE"
             except Exception as e:
@@ -458,46 +496,58 @@ def update_task_status(task_id: str, status: str) -> bool:
         
         elif task_type == "MOVE_SHELF" and shelf_id:
             """
-            MOVE_SHELF: Shelf stays at target location (shelf's location).
-            Update shelf current location using coordinates from target_shelf_id.
+            MOVE_SHELF: Shelf stays at target location.
+            Update shelf current location.
+            CRITICAL: Use robot's ACTUAL position if available to prevent snapping.
             """
             try:
                 from .shelf_location_service import update_shelf_current_location
                 
-                target_shelf_id = current_task.get("target_shelf_id")
-                if target_shelf_id:
-                    # Get target shelf location
-                    from .shelf_service import get_shelf
-                    target_shelf = get_shelf(target_shelf_id)
-                    if target_shelf:
-                        # Move source shelf to target shelf's location
-                        target_x = target_shelf.get("current_x", 0.0)
-                        target_y = target_shelf.get("current_y", 0.0)
-                        target_yaw = target_shelf.get("current_yaw", 0.0)
-                        
-                        update_shelf_current_location(
-                            shelf_id,
-                            target_x,
-                            target_y,
-                            target_yaw,
-                            location_status="REPOSITIONED",
-                            task_id=task_id
-                        )
-                        app.logger.info(
-                            f"[TASK COMPLETION] MOVE_SHELF task {task_id}: "
-                            f"Shelf {shelf_id} moved to target shelf location "
-                            f"({target_x}, {target_y})"
-                        )
-                    else:
-                        app.logger.warning(
-                            f"[TASK COMPLETION] MOVE_SHELF task {task_id}: "
-                            f"Target shelf {target_shelf_id} not found"
-                        )
-                else:
-                    app.logger.warning(
-                        f"[TASK COMPLETION] MOVE_SHELF task {task_id}: "
-                        f"No target_shelf_id specified"
-                    )
+                # Default logic (theoretical target)
+                final_x = 0.0
+                final_y = 0.0
+                final_yaw = 0.0
+                
+                # 1. Try robot position first (preferred)
+                robot_pos_found = False
+                robot_id = current_task.get("assigned_robot_id")
+                if robot_id:
+                    try:
+                        oid_robot = ObjectId(robot_id)
+                        robot = db.robots.find_one({"_id": oid_robot})
+                    except Exception:
+                        robot = db.robots.find_one({"robot_id": robot_id})
+                    
+                    if robot and robot.get("current_x") is not None:
+                        final_x = float(robot.get("current_x"))
+                        final_y = float(robot.get("current_y"))
+                        final_yaw = float(robot.get("current_yaw", 0.0))
+                        robot_pos_found = True
+                        app.logger.info(f"[TASK COMPLETION] Using robot position for move completion: ({final_x}, {final_y})")
+
+                # 2. Fallback to target shelf location if robot pos not found
+                if not robot_pos_found:
+                    target_shelf_id = current_task.get("target_shelf_id")
+                    if target_shelf_id:
+                        from .shelf_service import get_shelf
+                        target_shelf = get_shelf(target_shelf_id)
+                        if target_shelf:
+                            final_x = target_shelf.get("current_x", 0.0)
+                            final_y = target_shelf.get("current_y", 0.0)
+                            final_yaw = target_shelf.get("current_yaw", 0.0)
+                
+                update_shelf_current_location(
+                    shelf_id,
+                    final_x,
+                    final_y,
+                    final_yaw,
+                    location_status="REPOSITIONED",
+                    task_id=task_id
+                )
+                app.logger.info(
+                    f"[TASK COMPLETION] MOVE_SHELF task {task_id}: "
+                    f"Shelf {shelf_id} moved to target location ({final_x}, {final_y})"
+                )
                 upd["$set"]["completion_action"] = "MOVED_TO_TARGET"
             except Exception as e:
                 app.logger.error(
@@ -510,27 +560,43 @@ def update_task_status(task_id: str, status: str) -> bool:
         elif task_type == "REPOSITION" and shelf_id:
             """
             REPOSITION: Shelf stays at target zone.
-            Update shelf current location using zone coordinates from task.
+            Update shelf current location.
+            CRITICAL: Use robot's ACTUAL position if available to prevent snapping.
             """
             try:
                 from .shelf_location_service import update_shelf_current_location
                 
-                # Use drop/target coordinates from task (zone location)
-                drop_x = current_task.get("drop_x", 0.0)
-                drop_y = current_task.get("drop_y", 0.0)
-                drop_yaw = current_task.get("drop_yaw", 0.0)
+                # Default to theoretical drop coordinates
+                final_x = float(current_task.get("drop_x", 0.0))
+                final_y = float(current_task.get("drop_y", 0.0))
+                final_yaw = float(current_task.get("drop_yaw", 0.0))
+                
+                # Try to get robot's actual position
+                robot_id = current_task.get("assigned_robot_id")
+                if robot_id:
+                    try:
+                        oid_robot = ObjectId(robot_id)
+                        robot = db.robots.find_one({"_id": oid_robot})
+                    except Exception:
+                        robot = db.robots.find_one({"robot_id": robot_id})
+                    
+                    if robot and robot.get("current_x") is not None:
+                        final_x = float(robot.get("current_x"))
+                        final_y = float(robot.get("current_y"))
+                        final_yaw = float(robot.get("current_yaw", 0.0))
+                        app.logger.info(f"[TASK COMPLETION] Using robot position for reposition: ({final_x}, {final_y})")
                 
                 update_shelf_current_location(
                     shelf_id,
-                    drop_x,
-                    drop_y,
-                    drop_yaw,
+                    final_x,
+                    final_y,
+                    final_yaw,
                     location_status="REPOSITIONED_AT_ZONE",
                     task_id=task_id
                 )
                 app.logger.info(
                     f"[TASK COMPLETION] REPOSITION task {task_id}: "
-                    f"Shelf {shelf_id} repositioned at zone ({drop_x}, {drop_y})"
+                    f"Shelf {shelf_id} repositioned at zone ({final_x}, {final_y})"
                 )
                 upd["$set"]["completion_action"] = "REPOSITIONED_AT_ZONE"
             except Exception as e:

@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt
 from pydantic import ValidationError
 
@@ -28,6 +28,22 @@ def handle_validation_error(err: ValidationError):
     return jsonify({"error": "validation_error", "details": err.errors()}), 400
 
 
+def _emit_product_update(data, action):
+    """Helper to emit WebSocket event safely"""
+    try:
+        if "socketio" in current_app.extensions:
+            socketio = current_app.extensions["socketio"]
+            from .ws_live_updates import emit_product_update
+            # Assuming 'data' is the product dict or similar
+            if data:
+                # Ensure we don't fail serialization
+                from ..services.utils_service import serialize
+                serialized = serialize(data) if isinstance(data, dict) else data
+                emit_product_update(socketio, serialized, action)
+    except Exception as e:
+        current_app.logger.error(f"Failed to emit product update: {e}")
+
+
 # =========================================================
 # PRODUCT CRUD
 # =========================================================
@@ -38,7 +54,13 @@ def create_product_route():
         data = ProductCreate(**request.json).dict()
     except ValidationError as e:
         return handle_validation_error(e)
-    return jsonify(create_product(data)), 201
+    
+    new_product = create_product(data)
+    
+    # Emit Websocket Event
+    _emit_product_update(new_product, "CREATED")
+    
+    return jsonify(new_product), 201
 
 
 @products_bp.route("", methods=["GET"])
@@ -59,8 +81,15 @@ def update_product_route(id):
         data = ProductUpdate(**request.json).dict(exclude_none=True)
     except ValidationError as e:
         return handle_validation_error(e)
+    
     result = update_product(id, data)
-    return jsonify(result) if result else ({"error": "not_found"}, 404)
+    if not result:
+        return jsonify({"error": "not_found"}), 404
+        
+    # Emit Websocket Event
+    _emit_product_update(result, "UPDATED")
+    
+    return jsonify(result), 200
 
 
 @products_bp.route("/<id>", methods=["DELETE"])
@@ -68,6 +97,10 @@ def update_product_route(id):
 def delete_product_route(id):
     if not soft_delete_product(id):
         return {"error": "not_found"}, 404
+    
+    # Emit Websocket Event with ID
+    _emit_product_update({"_id": id}, "DELETED")
+    
     return {"status": "deleted"}
 
 
