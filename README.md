@@ -47,7 +47,7 @@ The frontend is a separate repository that needs to be cloned and run.
     ```bash
     npm run dev
     ```
-    The frontend should now be accessible in your browser (usually at `http://localhost:5173`).
+    The frontend should now be accessible in your browser (usually at `http://localhost:8081`).
 
 ### 3. ROS 2 Setup
 
