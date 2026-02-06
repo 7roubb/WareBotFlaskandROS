@@ -90,6 +90,44 @@ def _resolve_zone_coords(zone_id: str) -> tuple:
     return x, y, yaw
 
 
+
+def _validate_drop_location(db, x: float, y: float, ignore_shelf_id: str, is_return_task: bool = False):
+    """
+    Validate if a drop location is safe.
+    Raises ValueError if:
+    1. Location is occupied by another shelf (current_x/y).
+    2. Location is a reserved storage spot for another shelf (storage_x/y).
+    
+    Radius is hardcoded to 0.5m (50cm) for now.
+    """
+    radius = 0.5
+    radius_sq = radius * radius
+    
+    # 1. Check for CURRENT location occupancy (is there a shelf already there?)
+    # Exclude the shelf being moved (obviously)
+    current_occupants = db.shelves.find({
+        "_id": {"$ne": ObjectId(ignore_shelf_id)},
+        "deleted": False
+    })
+    
+    for s in current_occupants:
+        # Check current location
+        cx = float(s.get("current_x", 0))
+        cy = float(s.get("current_y", 0))
+        dist_sq = (cx - x)**2 + (cy - y)**2
+        if dist_sq < radius_sq:
+            raise ValueError(f"drop_location_occupied_by_shelf_{s.get('_id')}")
+
+        # 2. Check for STORAGE location conflict (is this someone's home?)
+        # For RETURN_SHELF tasks, we allow going to own storage (obviously)
+        # But we must NOT go to *another* shelf's storage.
+        sx = float(s.get("storage_x", 0))
+        sy = float(s.get("storage_y", 0))
+        s_dist_sq = (sx - x)**2 + (sy - y)**2
+        if s_dist_sq < radius_sq:
+             raise ValueError(f"drop_location_is_storage_of_shelf_{s.get('_id')}")
+
+
 def create_task_and_assign(
     shelf_id: str,
     priority: int,
@@ -106,7 +144,7 @@ def create_task_and_assign(
     Robot selection criteria:
     - Status must be IDLE (not BUSY, ERROR, or OFFLINE)
     - Must have valid position (current_x/current_y or x/y)
-    - Best robot selected based on distance + battery level heuristic
+    - Best robot selected based on distance (nearest)
     
     task_type options:
     - PICKUP_AND_DELIVER: Pick shelf, deliver to zone (or same location)
@@ -164,6 +202,16 @@ def create_task_and_assign(
                 drop_x, drop_y, drop_yaw = zx, zy, zyaw
                 drop_zone_id = target_zone_id
 
+    # CRITICAL: Validate Drop Location Safety
+    # Reject if occupied or is storage of another shelf
+    _validate_drop_location(
+        db, 
+        drop_x, 
+        drop_y, 
+        ignore_shelf_id=shelf_id, 
+        is_return_task=(task_type == "RETURN_SHELF")
+    )
+
     # Find IDLE robots (not BUSY, ERROR, or OFFLINE)
     # Status must be IDLE, and must have valid position (x/y)
     robots = list(db.robots.find({"deleted": False, "status": "IDLE"}))
@@ -197,8 +245,27 @@ def create_task_and_assign(
         except Exception:
             continue
         
-        # Cost function: distance (70%) + battery depletion (30%)
-        cost = dist * 0.7 + (100.0 - battery) * 0.3
+    # Cost function: PURE DISTANCE (nearest robot)
+        cost = dist
+        
+        # CRITICAL: Double-Check - Is this robot REALLY idle?
+        # Check if there are any active tasks for this robot in DB
+        # This prevents double-assignment if status wasn't updated fast enough
+        robot_ref_id = _to_str_id(r.get("_id"))
+        active_task_exists = db.tasks.find_one({
+            "assigned_robot_id": robot_ref_id,
+            "status": {"$in": ["ASSIGNED", "MOVING_TO_PICKUP", "ATTACHED", "MOVING_TO_DROP", "DROPPING"]}
+        })
+        
+        if active_task_exists:
+            # Robot has an active task! Skip it and mark as BUSY to self-repair
+            app.logger.warning(f"[TASK ASSIGN] Robot {r.get('robot_id')} has active task {active_task_exists.get('_id')} but status was {r.get('status')}. Marking BUSY and skipping.")
+            try:
+                db.robots.update_one({"_id": r["_id"]}, {"$set": {"status": "BUSY", "updated_at": datetime.utcnow()}})
+            except:
+                pass
+            continue
+
         if cost < best_cost:
             best_cost = cost
             best = r
@@ -209,6 +276,22 @@ def create_task_and_assign(
     now = datetime.utcnow()
     assigned_robot_name = best.get("robot_id") or best.get("name") or ""
     assigned_robot_id = _to_str_id(best.get("_id"))
+    
+    # CRITICAL: Mark robot as BUSY immediately
+    try:
+        if best.get("_id"):
+            db.robots.update_one(
+                {"_id": best["_id"]},
+                {"$set": {"status": "BUSY", "updated_at": now}}
+            )
+        elif best.get("robot_id"):
+            db.robots.update_one(
+                {"robot_id": best["robot_id"]},
+                {"$set": {"status": "BUSY", "updated_at": now}}
+            )
+    except Exception as e:
+        app.logger.error(f"Failed to mark robot {assigned_robot_name} as BUSY: {e}")
+
     doc = {
         "shelf_id": shelf_id,
         "priority": int(priority),

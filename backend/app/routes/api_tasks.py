@@ -183,157 +183,183 @@ def restore_shelf_by_product_route():
 
     return jsonify(task), 201
 
+"""
+FIXED _dispatch_task_mqtt() function for tasks.py
+
+Replace the existing _dispatch_task_mqtt() function (lines ~150-262) with this version.
+This simplifies robot ID resolution and ensures compatibility with task runner.
+"""
 
 def _dispatch_task_mqtt(task):
-    if not task: return
+    """
+    Dispatch task to robot via MQTT - FIXED VERSION
+    
+    Key improvements:
+    1. Simplified robot ID resolution (no underscore variants)
+    2. Better error handling and logging
+    3. Tracks MQTT delivery status in database
+    4. Uses exact robot_id match for ROS2 namespace compatibility
+    """
+    if not task:
+        current_app.logger.warning("[MQTT] Cannot dispatch: task is None")
+        return
     
     db = get_db()
-    robot_id_for_topic = None
-
-    assigned_db_id = task.get("assigned_robot_id")
-    if assigned_db_id:
+    mqtt_client = current_app.mqtt
+    
+    if not mqtt_client:
+        current_app.logger.error("[MQTT] MQTT client not available")
+        return
+    
+    # =========================================================
+    # STEP 1: Get robot_id (must match ROS2 namespace exactly)
+    # =========================================================
+    robot_id = None
+    
+    # Option A: Use assigned_robot_name (direct match to ROS2 namespace)
+    if task.get("assigned_robot_name"):
+        robot_id = task["assigned_robot_name"]
+        current_app.logger.debug(f"[MQTT] Using assigned_robot_name: {robot_id}")
+    
+    # Option B: Lookup by MongoDB _id
+    elif task.get("assigned_robot_id"):
         try:
-            oid = ObjectId(assigned_db_id)
-        except Exception:
-            oid = assigned_db_id
-        robot_doc = db.robots.find_one({"_id": oid, "deleted": False})
-        if robot_doc:
-            robot_id_for_topic = robot_doc.get("robot_id")
-
-    if not robot_id_for_topic:
-        candidate = task.get("assigned_robot_name")
-        if candidate:
-            robot_doc = db.robots.find_one({"robot_id": candidate, "deleted": False})
+            robot_doc = db.robots.find_one({
+                "_id": ObjectId(task["assigned_robot_id"]),
+                "deleted": False
+            })
             if robot_doc:
-                robot_id_for_topic = robot_doc.get("robot_id")
+                robot_id = robot_doc.get("robot_id")
+                current_app.logger.debug(f"[MQTT] Resolved robot_id from DB: {robot_id}")
             else:
-                robot_doc = db.robots.find_one({"name": candidate, "deleted": False})
-                if robot_doc:
-                    robot_id_for_topic = robot_doc.get("robot_id")
-
-    if not robot_id_for_topic:
-        robot_id_for_topic = task.get("assigned_robot_name")
-
-    # Resolve current coordinates
+                current_app.logger.error(
+                    f"[MQTT] Robot with _id={task['assigned_robot_id']} not found"
+                )
+        except Exception as e:
+            current_app.logger.error(f"[MQTT] Failed to lookup robot: {e}")
+    
+    if not robot_id:
+        error_msg = f"Cannot dispatch task {task.get('id')}: no robot_id found"
+        current_app.logger.error(f"[MQTT] {error_msg}")
+        
+        # Update task with error
+        if task.get("_id"):
+            db.tasks.update_one(
+                {"_id": task["_id"]},
+                {"$set": {
+                    "mqtt_delivery_status": "FAILED",
+                    "mqtt_delivery_errors": [error_msg],
+                    "mqtt_delivery_attempted_at": datetime.utcnow()
+                }}
+            )
+        return
+    
+    # Validate robot_id format (should be robot0, robot1, etc.)
+    if not robot_id.startswith("robot"):
+        current_app.logger.warning(
+            f"[MQTT] Unusual robot_id format: {robot_id} "
+            f"(expected robot0, robot1, etc.)"
+        )
+    
+    # =========================================================
+    # STEP 2: Resolve task coordinates
+    # =========================================================
     try:
-        task_oid = str(task.get("_id")) if hasattr(task.get("_id"), '__str__') else task.get("_id")
-        coords = resolve_task_coordinates(task_oid)
-    except ValueError:
+        task_id_str = str(task["_id"]) if "_id" in task else task.get("id")
+        coords = resolve_task_coordinates(task_id_str)
+        current_app.logger.debug(f"[MQTT] Resolved coordinates for task {task_id_str}")
+    except ValueError as e:
+        current_app.logger.warning(
+            f"[MQTT] Could not resolve coordinates via service, using task fields: {e}"
+        )
         coords = {
-            "pickup_x": task.get("origin_pickup_x") or task.get("pickup_x") or task.get("target_x"),
-            "pickup_y": task.get("origin_pickup_y") or task.get("pickup_y") or task.get("target_y"),
-            "pickup_yaw": task.get("origin_pickup_yaw") or task.get("pickup_yaw") or task.get("target_yaw") or 0.0,
-            "drop_x": task.get("drop_x", task.get("zone_x", 0.0)),
-            "drop_y": task.get("drop_y", task.get("zone_y", 0.0)),
-            "drop_yaw": task.get("drop_yaw", 0.0),
+            "pickup_x": task.get("pickup_x") or task.get("origin_pickup_x") or 0.0,
+            "pickup_y": task.get("pickup_y") or task.get("origin_pickup_y") or 0.0,
+            "pickup_yaw": task.get("pickup_yaw") or task.get("origin_pickup_yaw") or 0.0,
+            "drop_x": task.get("drop_x") or task.get("zone_x") or 0.0,
+            "drop_y": task.get("drop_y") or task.get("zone_y") or 0.0,
+            "drop_yaw": task.get("drop_yaw") or 0.0,
         }
-
-    # Build MQTT payload
-    payload_dict = {
+    except Exception as e:
+        current_app.logger.error(f"[MQTT] Unexpected error resolving coordinates: {e}")
+        coords = {
+            "pickup_x": 0.0, "pickup_y": 0.0, "pickup_yaw": 0.0,
+            "drop_x": 0.0, "drop_y": 0.0, "drop_yaw": 0.0,
+        }
+    
+    # =========================================================
+    # STEP 3: Build MQTT payload
+    # =========================================================
+    payload = {
+        # Task identification
         "task_id": task.get("id"),
         "task_type": task.get("task_type", "PICKUP_AND_DELIVER"),
         "shelf_id": task.get("shelf_id"),
-        "priority": task.get("priority"),
-        "pickup_x": coords["pickup_x"],
-        "pickup_y": coords["pickup_y"],
-        "pickup_yaw": coords["pickup_yaw"],
-        "target_x": coords["pickup_x"],
-        "target_y": coords["pickup_y"],
-        "target_yaw": coords["pickup_yaw"],
-        "drop_x": coords["drop_x"],
-        "drop_y": coords["drop_y"],
-        "drop_yaw": coords["drop_yaw"],
+        "priority": task.get("priority", 1),
+        
+        # Pickup coordinates
+        "pickup_x": float(coords["pickup_x"]),
+        "pickup_y": float(coords["pickup_y"]),
+        "pickup_yaw": float(coords["pickup_yaw"]),
+        
+        # Drop-off coordinates
+        "drop_x": float(coords["drop_x"]),
+        "drop_y": float(coords["drop_y"]),
+        "drop_yaw": float(coords["drop_yaw"]),
         "drop_zone_id": task.get("drop_zone_id"),
     }
-
-    payload = json.dumps(payload_dict)
-    mqtt_client = current_app.mqtt
-
-    if mqtt_client:
-        candidate_ids = []
-        if robot_id_for_topic:
-            candidate_ids.append(str(robot_id_for_topic))
+    
+    # =========================================================
+    # STEP 4: Publish to MQTT with QoS=1
+    # =========================================================
+    topic = f"robot/{robot_id}/task/assignment"
+    
+    try:
+        payload_json = json.dumps(payload)
         
-        # Add variants
-        alt_variants = []
-        for cid in candidate_ids:
-            if cid:
-                no_us = cid.replace("_", "")
-                if no_us and no_us != cid:
-                    alt_variants.append(no_us)
-        for v in alt_variants:
-            if v not in candidate_ids:
-                candidate_ids.append(v)
-
-        # Track publish success for reliability monitoring
-        publish_success = False
-        publish_errors = []
+        # Publish with QoS=1 for guaranteed delivery (at least once)
+        result = mqtt_client.publish(topic, payload_json, qos=1)
         
-        for cid in candidate_ids:
-            try:
-                t = f"robot/{cid}/task/assignment"
-                
-                # Publish with QoS=1 for guaranteed delivery (at least once)
-                result = mqtt_client.publish(t, payload, qos=1)
-                
-                # Check if publish was successful
-                if result.rc == 0:  # MQTT_ERR_SUCCESS
-                    current_app.logger.info(
-                        f"[MQTT] ✅ Task published successfully → {t} "
-                        f"(task_id={payload_dict['task_id']}, qos=1)"
-                    )
-                    publish_success = True
-                else:
-                    error_msg = f"MQTT publish failed with rc={result.rc}"
-                    publish_errors.append(f"{t}: {error_msg}")
-                    current_app.logger.error(
-                        f"[MQTT] ❌ Task publish failed → {t}: {error_msg} "
-                        f"(task_id={payload_dict['task_id']})"
-                    )
-                    
-            except Exception as e:
-                error_msg = str(e)
-                publish_errors.append(f"{t}: {error_msg}")
-                current_app.logger.exception(
-                    f"[MQTT] ❌ Exception publishing task to {t} "
-                    f"(task_id={payload_dict['task_id']}): {error_msg}"
-                )
-        
-        # Update task document with delivery status for debugging
-        if not publish_success and task.get("_id"):
-            try:
-                task_oid = task.get("_id")
+        if result.rc == 0:  # MQTT_ERR_SUCCESS
+            current_app.logger.info(
+                f"[MQTT] ✅ Task {payload['task_id']} published successfully\n"
+                f"       Topic: {topic}\n"
+                f"       Pickup: ({payload['pickup_x']:.2f}, {payload['pickup_y']:.2f})\n"
+                f"       Drop: ({payload['drop_x']:.2f}, {payload['drop_y']:.2f})\n"
+                f"       Priority: {payload['priority']}, QoS: 1"
+            )
+            
+            # Update task delivery status
+            if task.get("_id"):
                 db.tasks.update_one(
-                    {"_id": task_oid},
-                    {
-                        "$set": {
-                            "mqtt_delivery_status": "FAILED",
-                            "mqtt_delivery_errors": publish_errors,
-                            "mqtt_delivery_attempted_at": datetime.utcnow()
-                        }
-                    }
+                    {"_id": task["_id"]},
+                    {"$set": {
+                        "mqtt_delivery_status": "SUCCESS",
+                        "mqtt_delivery_attempted_at": datetime.utcnow(),
+                        "mqtt_topic": topic
+                    }}
                 )
-                current_app.logger.warning(
-                    f"[MQTT] ⚠️  Task {payload_dict['task_id']} created in DB but "
-                    f"MQTT delivery failed. Errors: {publish_errors}"
-                )
-            except Exception as e:
-                current_app.logger.error(f"[MQTT] Failed to update task delivery status: {e}")
-        elif publish_success and task.get("_id"):
-            try:
-                task_oid = task.get("_id")
-                db.tasks.update_one(
-                    {"_id": task_oid},
-                    {
-                        "$set": {
-                            "mqtt_delivery_status": "SUCCESS",
-                            "mqtt_delivery_attempted_at": datetime.utcnow()
-                        }
-                    }
-                )
-            except Exception:
-                pass  # Don't fail task creation if status tracking fails
-
+        else:
+            raise Exception(f"MQTT publish failed with return code {result.rc}")
+            
+    except Exception as e:
+        error_msg = str(e)
+        current_app.logger.error(
+            f"[MQTT] ❌ Failed to publish task {payload['task_id']} to {topic}\n"
+            f"       Error: {error_msg}"
+        )
+        
+        # Update task with failure status
+        if task.get("_id"):
+            db.tasks.update_one(
+                {"_id": task["_id"]},
+                {"$set": {
+                    "mqtt_delivery_status": "FAILED",
+                    "mqtt_delivery_errors": [error_msg],
+                    "mqtt_delivery_attempted_at": datetime.utcnow(),
+                    "mqtt_topic": topic
+                }}
+            )
 
 # ---------------------------------------------------------
 # Delete task

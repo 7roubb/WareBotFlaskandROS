@@ -15,7 +15,8 @@ class MQTTHandler:
     def __init__(self, robot_id: str, host: str, port: int, qos: int, 
                  reconnect_base: float, reconnect_max: float, logger,
                  on_task_assignment: Callable = None,
-                 on_reference_update: Callable = None):
+                 on_reference_update: Callable = None,
+                 on_fleet_status: Callable = None):
         self.robot_id = robot_id
         self.host = host
         self.port = port
@@ -31,6 +32,7 @@ class MQTTHandler:
         # Callbacks
         self.on_task_assignment = on_task_assignment
         self.on_reference_update = on_reference_update
+        self.on_fleet_status = on_fleet_status
         
         # Status publishing queue
         self.status_update_queue = deque()
@@ -107,6 +109,10 @@ class MQTTHandler:
                 client.subscribe(f"robot/{self.robot_id}/task/assignment", qos=self.qos)
                 client.subscribe(f"robot/{self.robot_id}/reference_point/update", qos=self.qos)
                 client.subscribe("robot/all/task/assignment", qos=self.qos)
+                
+                # Subscribe to fleet status
+                client.subscribe("robots/mp400/+/status", qos=self.qos)
+                
                 self.logger.info("✅ MQTT subscriptions set")
                 
                 # Publish ready status
@@ -140,8 +146,16 @@ class MQTTHandler:
         topic = msg.topic
         if "task/assignment" in topic:
             self.logger.info(f"📨 Task assignment received via MQTT: {data.get('task_id')}")
+            is_broadcast = "robot/all" in topic
             if isinstance(data, dict) and self.on_task_assignment:
-                self.on_task_assignment(data)
+                self.on_task_assignment(data, is_broadcast)
+        elif "status" in topic and "robots/mp400" in topic:
+            if self.on_fleet_status:
+                # Extract robot_name from topic robots/mp400/<name>/status
+                parts = topic.split('/')
+                if len(parts) >= 4:
+                    robot_name = parts[2]
+                    self.on_fleet_status(robot_name, data)
         elif "reference_point/update" in topic:
             self.logger.info("Reference point update received")
             if isinstance(data, dict) and self.on_reference_update:

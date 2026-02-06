@@ -1,5 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
@@ -60,6 +61,12 @@ def generate_launch_description():
         "mqtt_reconnect_max",
         default_value="30.0",
         description="Maximum reconnection delay in seconds"
+    )
+    
+    enable_hardware_arg = DeclareLaunchArgument(
+        "enable_hardware",
+        default_value="true",
+        description="Enable hardware controllers (set to false for simulation)"
     )
     
     # AprilTag parameters
@@ -151,6 +158,7 @@ def generate_launch_description():
         ],
         output="screen",
         emulate_tty=True,
+        condition=IfCondition(LaunchConfiguration("enable_hardware")),
     )
     
     # INTEGRATED TASK RUNNER NODE
@@ -166,6 +174,7 @@ def generate_launch_description():
             {"mqtt_qos": LaunchConfiguration("mqtt_qos")},
             {"mqtt_reconnect_base": LaunchConfiguration("mqtt_reconnect_base")},
             {"mqtt_reconnect_max": LaunchConfiguration("mqtt_reconnect_max")},
+            {"enable_hardware": LaunchConfiguration("enable_hardware")},
             
             # AprilTag parameters
             {"image_topic": LaunchConfiguration("image_topic")},
@@ -201,6 +210,7 @@ def generate_launch_description():
         mqtt_qos_arg,
         mqtt_reconnect_base_arg,
         mqtt_reconnect_max_arg,
+        enable_hardware_arg,
         image_topic_arg,
         cmd_vel_topic_arg,
         estop_topic_arg,

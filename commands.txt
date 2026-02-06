@@ -33,5 +33,5 @@ db.shelves.createIndex(
 )
 
 
-ros2 launch warebot_task_runner task_runner.launch.py robot_id:=robot_1
+ros2 launch warebot_task_runner task_runner.launch.py robot_id:=robot1
 

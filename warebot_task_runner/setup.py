@@ -18,6 +18,7 @@ setup(
         ('share/' + package_name + '/launch',
             [
                 'launch/task_runner.launch.py',
+                'launch/simulation_fleet.launch.py',
             ]),
         
         # Configuration and calibration files
@@ -45,6 +46,7 @@ setup(
     entry_points={
         'console_scripts': [
             'task_runner = warebot_task_runner.main:main',
+            'robot_monitor = warebot_task_runner.robot_monitor:main',
         ],
     },
 )

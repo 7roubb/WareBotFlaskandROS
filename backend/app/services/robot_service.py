@@ -30,6 +30,22 @@ def update_robot_telemetry(robot_name: str, telemetry: dict) -> bool:
     y = telemetry.get("y")
     yaw = telemetry.get("yaw")
     
+    
+    # CRITICAL: Fix for Race Condition
+    # If robot is currently marked BUSY in DB, telemetry (reporting IDLE) must NOT overwrite it.
+    # We only allow telemetry to update status if:
+    # 1. New status is ERROR or OFFLINE (critical states)
+    # 2. Current DB status is NOT BUSY
+    
+    new_status = telemetry.get("status", "IDLE")
+    
+    # Fetch current robot status to check for BUSY
+    current_robot = db.robots.find_one({"robot_id": robot_name}, {"status": 1})
+    if current_robot and current_robot.get("status") == "BUSY":
+        if new_status == "IDLE":
+            # Ignore IDLE from telemetry if we are BUSY in DB
+            new_status = "BUSY"
+            
     update_data = {
         "updated_at": datetime.utcnow(),
         
@@ -44,8 +60,8 @@ def update_robot_telemetry(robot_name: str, telemetry: dict) -> bool:
         "current_y": float(y) if y is not None else 0.0,
         "current_yaw": float(yaw) if yaw is not None else 0.0,
         
-        # Status
-        "status": telemetry.get("status", "IDLE"),
+        # Status (protected)
+        "status": new_status,
     }
     
     # Update robot by robot_id (NOT robot_name)

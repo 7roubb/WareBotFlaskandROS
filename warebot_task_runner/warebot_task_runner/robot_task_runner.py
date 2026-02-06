@@ -45,7 +45,41 @@ FOOTPRINT_NAMES = {
 }
 
 
+class DummyAlignmentController:
+    """Mock controller for simulation"""
+    def __init__(self, logger):
+        self.logger = logger
+        self.callback = None
+    def set_aligned_callback(self, callback):
+        self.callback = callback
+    def set_actuator_controller(self, controller):
+        pass
+    def start_alignment(self):
+        self.logger.info("🤖 [SIM] Alignment started (Mock)")
+        # Simulate delay then verify
+        if self.callback:
+            # Call immediately or use a timer if needed, but for simplicity:
+            threading.Timer(2.0, self._finish).start()
+    def _finish(self):
+        self.logger.info("🤖 [SIM] Alignment complete (Mock)")
+        if self.callback: self.callback()
+
+class DummyActuatorController:
+    """Mock controller for simulation"""
+    def __init__(self, logger):
+        self.logger = logger
+    def extend(self):
+        self.logger.info("🤖 [SIM] Actuators EXTENDING (Mock)")
+        return True
+    def retract(self):
+        self.logger.info("🤖 [SIM] Actuators RETRACTING (Mock)")
+        return True
+    def stop(self):
+        pass
+
+
 class RobotTaskRunner(Node):
+
     """
     Integrated Task Runner with AprilTag Alignment + MQTT + Linear Actuators + Built-in Footprint Switching
     
@@ -63,6 +97,10 @@ class RobotTaskRunner(Node):
         
         # Get parameter values
         self._load_parameters()
+
+        # Fleet State for assignment logic
+        self.fleet_state = {}
+        self.fleet_lock = threading.Lock()
 
         self.get_logger().info(f"Task Runner initialized for {self.robot_id}")
 
@@ -86,28 +124,33 @@ class RobotTaskRunner(Node):
         # MODIFIED: Initialize Alignment Controller with calibration_file_path
         # ========================================================================
         
-        self.alignment_controller = AlignmentController(
-            node=self,
-            logger=self.get_logger(),
-            cmd_vel_topic=self.cmd_vel_topic,
-            image_topic=self.image_topic,
-            estop_topic=self.estop_topic,
-            show_debug=self.show_debug,
-            lost_tag_timeout=self.lost_tag_timeout,
-            alignment_hold_time=self.alignment_hold_time,
-            calibration_file_path=self.calibration_file_path,  # From launch parameter
-            tag_size=0.068,
-            tag_ids=[294, 323, 420, 530],
-            package_share_dir=None  # Will auto-detect
-        )
-        self.alignment_controller.set_aligned_callback(self.on_alignment_complete)
+        if self.enable_hardware:
+            self.alignment_controller = AlignmentController(
+                node=self,
+                logger=self.get_logger(),
+                cmd_vel_topic=self.cmd_vel_topic,
+                image_topic=self.image_topic,
+                estop_topic=self.estop_topic,
+                show_debug=self.show_debug,
+                lost_tag_timeout=self.lost_tag_timeout,
+                alignment_hold_time=self.alignment_hold_time,
+                calibration_file_path=self.calibration_file_path,  # From launch parameter
+                tag_size=0.068,
+                tag_ids=[294, 323, 420, 530],
+                package_share_dir=None  # Will auto-detect
+            )
+            # Initialize Linear Actuator Controller
+            self.actuator_controller = LinearActuatorController(
+                port=self.actuator_port,
+                baudrate=self.actuator_baudrate,
+                logger=self.get_logger()
+            )
+        else:
+            self.get_logger().warn("⚠️  SIMULATION MODE: Hardware Disabled")
+            self.alignment_controller = DummyAlignmentController(self.get_logger())
+            self.actuator_controller = DummyActuatorController(self.get_logger())
 
-        # Initialize Linear Actuator Controller
-        self.actuator_controller = LinearActuatorController(
-            port=self.actuator_port,
-            baudrate=self.actuator_baudrate,
-            logger=self.get_logger()
-        )
+        self.alignment_controller.set_aligned_callback(self.on_alignment_complete)
         self.alignment_controller.set_actuator_controller(self.actuator_controller)
 
         # ✅ Initialize Built-in Footprint Switcher
@@ -123,7 +166,8 @@ class RobotTaskRunner(Node):
             reconnect_max=self.reconnect_max,
             logger=self.get_logger(),
             on_task_assignment=self.on_task_assignment,
-            on_reference_update=self.on_reference_point_update
+            on_reference_update=self.on_reference_point_update,
+            on_fleet_status=self.on_fleet_status
         )
         self.mqtt_handler.start()
 
@@ -143,6 +187,7 @@ class RobotTaskRunner(Node):
     def _declare_parameters(self):
         """Declare all ROS2 parameters"""
         self.declare_parameter("robot_id", "robot_1")
+        self.declare_parameter("enable_hardware", True)  # NEW: For simulation mode
         self.declare_parameter("mqtt_host", "localhost")
         self.declare_parameter("mqtt_port", 1884)
         self.declare_parameter("mqtt_qos", 1)
@@ -172,6 +217,7 @@ class RobotTaskRunner(Node):
     def _load_parameters(self):
         """Load parameter values"""
         self.robot_id = self.get_parameter("robot_id").value
+        self.enable_hardware = self.get_parameter("enable_hardware").value
         self.mqtt_host = self.get_parameter("mqtt_host").value
         self.mqtt_port = int(self.get_parameter("mqtt_port").value)
         self.mqtt_qos = int(self.get_parameter("mqtt_qos").value)
@@ -357,7 +403,12 @@ class RobotTaskRunner(Node):
 
     # ================= TASK HANDLING =================
 
-    def on_task_assignment(self, task_data: Dict[str, Any]):
+    def on_fleet_status(self, robot_name: str, data: Dict[str, Any]):
+        """Update fleet state"""
+        with self.fleet_lock:
+            self.fleet_state[robot_name] = data
+
+    def on_task_assignment(self, task_data: Dict[str, Any], is_broadcast: bool = False):
         """Handle task assignment with deduplication"""
         task_id = task_data.get("task_id")
         
@@ -384,9 +435,60 @@ class RobotTaskRunner(Node):
                 "timestamp": time.time()
             }, "task/status")
             return
+            
+        # Assignment Logic (Nearest Neighbor if broadcast)
+        if is_broadcast:
+            should_accept = self._check_assignment_criteria(task_data)
+            if not should_accept:
+                return
 
         # Execute task immediately
         self._execute_task(task_data)
+        
+    def _check_assignment_criteria(self, task_data: Dict[str, Any]) -> bool:
+        """Determines if this robot should accept the task based on nearest neighbor logic"""
+        
+        # 1. Calculate my distance
+        if not self.reference_point: 
+            # If no ref point, assume we are at (0,0) or current position?
+            # Use current robot position
+            my_x, my_y = self.robot_x, self.robot_y
+        else:
+            my_x, my_y = self.robot_x, self.robot_y
+            
+        pickup_x = float(task_data.get("pickup_x", 0.0))
+        pickup_y = float(task_data.get("pickup_y", 0.0))
+        
+        my_dist = math.hypot(my_x - pickup_x, my_y - pickup_y)
+        
+        # 2. Check other IDLE robots
+        # We need to know who is IDLE and where they are
+        
+        best_robot = self.robot_id
+        min_dist = my_dist
+        
+        with self.fleet_lock:
+            for r_name, r_data in self.fleet_state.items():
+                if r_name == self.robot_id:
+                    continue # Skip self (already calc)
+                    
+                status = r_data.get("status", "IDLE")
+                # Only compare with IDLE robots
+                if status == "IDLE":
+                    r_x = float(r_data.get("x", 0.0))
+                    r_y = float(r_data.get("y", 0.0))
+                    r_dist = math.hypot(r_x - pickup_x, r_y - pickup_y)
+                    
+                    if r_dist < min_dist:
+                        min_dist = r_dist
+                        best_robot = r_name
+        
+        if best_robot != self.robot_id:
+            self.get_logger().info(f"🚫 Ignoring task {task_data.get('task_id')}: Robot {best_robot} is closer ({min_dist:.2f}m vs {my_dist:.2f}m)")
+            return False
+            
+        self.get_logger().info(f"✅ Accepting task {task_data.get('task_id')}: checking in as nearest robot ({my_dist:.2f}m)")
+        return True
 
     def on_reference_point_update(self, point_data: Dict[str, float]):
         """Update reference point"""
